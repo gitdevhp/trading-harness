@@ -20,7 +20,7 @@ def prefetch_data(ticker: str, start_date: str, end_date: str):
 # ==========================================
 # 2. THE DAILY ReAct EXECUTION LOOP
 # ==========================================
-def run_daily_agent(ticker: str, current_date: str, llm: LLM, playbook: str, current_cash: float, current_shares: float) -> dict:
+def run_daily_agent(ticker: str, current_date: str, llm: LLM, playbook: str, current_cash: float, current_shares: float, use_harness: bool) -> dict:
     
     def date_aware_price(arg_ticker: str) -> str:
         try:
@@ -55,14 +55,19 @@ Thought: [Your reasoning for what to do next based on observations and portfolio
 Action: tool_name[input_for_tool]
 Observation: [Provided by the system]"""
 
-    master_system_prompt = f"{engine_prompt}\n\n{playbook}"
-    
-    # INJECT PORTFOLIO STATE HERE
-    user_prompt = (
-        f"Today is {current_date}.\n"
-        f"PORTFOLIO STATUS: You have ${current_cash:,.2f} in cash and own {current_shares:,.2f} shares of {ticker}.\n"
-        f"Analyze {ticker} and decide whether to BUY, SELL, or HOLD today."
-    )
+    # --- TOGGLE LOGIC FOR HARNESS ---
+    if use_harness:
+        master_system_prompt = f"{engine_prompt}\n\n{playbook}"
+        # Inject precise portfolio state and constraints
+        user_prompt = (
+            f"Today is {current_date}.\n"
+            f"PORTFOLIO STATUS: You have ${current_cash:,.2f} in cash and own {current_shares:,.2f} shares of {ticker}.\n"
+            f"Analyze {ticker} and decide whether to BUY, SELL, or HOLD today."
+        )
+    else:
+        # Vanilla mode: No guardrails, no memory of cash/shares limits
+        master_system_prompt = engine_prompt
+        user_prompt = f"Today is {current_date}. Analyze {ticker} and decide whether to BUY, SELL, or HOLD today."
     
     messages = [
         {"role": "system", "content": master_system_prompt},
@@ -72,7 +77,8 @@ Observation: [Provided by the system]"""
     trajectory_log = []
     final_decision = "HOLD" 
     
-    print(f"\n[{current_date}] 🤖 Running AI logic (Cash: ${current_cash:,.2f} | Shares: {current_shares:,.2f})...")
+    mode_str = "HARNESS" if use_harness else "VANILLA"
+    print(f"\n[{current_date}] 🤖 Running AI logic [{mode_str}] (Cash: ${current_cash:,.2f} | Shares: {current_shares:,.2f})...")
     
     for step in range(8):
         outputs = llm.chat(messages=messages, sampling_params=sampling_params, use_tqdm=False)
@@ -114,17 +120,21 @@ Observation: [Provided by the system]"""
 # ==========================================
 # 3. THE HISTORICAL BACKTEST ENGINE 
 # ==========================================
-def run_backtest(ticker: str, start_date: str, end_date: str, initial_capital: float = 100000.0):
+def run_backtest(ticker: str, start_date: str, end_date: str, initial_capital: float = 100000.0, use_harness: bool = True):
     
     prefetch_data(ticker, start_date, end_date)
     df = GLOBAL_DATA_CACHE[ticker]
     trading_days = [d.strftime('%Y-%m-%d') for d in df.index]
     
-    try:
-        with open("../prompts/current_harness.md", "r", encoding="utf-8") as f:
-            playbook_prompt = f.read()
-    except FileNotFoundError:
-        playbook_prompt = "--- CURRENT TRADING MANDATE ---\nTrade conservatively."
+    # Load playbook only if harness is active
+    playbook_prompt = ""
+    if use_harness:
+        try:
+            with open("../prompts/react_harness.md", "r", encoding="utf-8") as f:
+                playbook_prompt = f.read()
+        except FileNotFoundError:
+            playbook_prompt = "--- CURRENT TRADING MANDATE ---\nTrade conservatively. Do not exceed cash balance."
+            print("⚠️ react_harness.md not found, using basic default constraints.")
 
     print("Loading Qwen into vLLM engine...")
     llm = LLM(
@@ -143,8 +153,8 @@ def run_backtest(ticker: str, start_date: str, end_date: str, initial_capital: f
     backtest_results = []
     
     for current_date in trading_days[5:]: 
-        # PASSED CASH AND SHARES INTO THE AGENT HERE
-        result = run_daily_agent(ticker, current_date, llm, playbook_prompt, ai_cash, ai_shares)
+        # Pass the use_harness flag down into the agent
+        result = run_daily_agent(ticker, current_date, llm, playbook_prompt, ai_cash, ai_shares, use_harness)
         decision = result["decision"]
         current_price = float(df.loc[current_date]['Close'])
         
@@ -179,15 +189,19 @@ def run_backtest(ticker: str, start_date: str, end_date: str, initial_capital: f
     baseline_return_pct = ((final_baseline_value - initial_capital) / initial_capital) * 100
 
     print("\n" + "="*40)
-    print("🏁 BACKTEST COMPLETE 🏁")
+    print(f"🏁 ReAct BACKTEST COMPLETE ({'HARNESS ENABLED' if use_harness else 'VANILLA'}) 🏁")
     print("="*40)
     print(f"Initial Capital:  ${initial_capital:,.2f}")
     print(f"AI Final Value:   ${final_ai_value:,.2f} ({ai_return_pct:+.2f}%)")
     print(f"Baseline Value:   ${final_baseline_value:,.2f} ({baseline_return_pct:+.2f}%)")
     
-    with open("backtest_results.json", "w") as f:
+    # Save to dedicated files based on mode
+    output_filename = "react_backtest_results_harness.json" if use_harness else "react_backtest_results_vanilla.json"
+    
+    with open(output_filename, "w") as f:
         json.dump({
             "metrics": {
+                "harness_active": use_harness,
                 "ai_return_pct": round(ai_return_pct, 2),
                 "baseline_return_pct": round(baseline_return_pct, 2),
                 "beat_market": final_ai_value > final_baseline_value
@@ -195,7 +209,10 @@ def run_backtest(ticker: str, start_date: str, end_date: str, initial_capital: f
             "daily_logs": backtest_results
         }, f, indent=4)
         
-    print("Saved trajectories and financial PnL to backtest_results.json")
+    print(f"Saved trajectories and financial PnL to {output_filename}")
 
 if __name__ == "__main__":
-    run_backtest("NVDA", start_date="2023-01-01", end_date="2026-04-01")
+    # EASY TOGGLE RIGHT HERE BEFORE RUNNING
+    USE_HARNESS = False 
+    
+    run_backtest("NVDA", start_date="2023-01-01", end_date="2026-04-01", use_harness=USE_HARNESS)
