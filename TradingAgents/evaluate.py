@@ -1,5 +1,8 @@
 import time
-from datetime import datetime, timedelta
+import json
+import pandas as pd
+import yfinance as yf
+from datetime import datetime
 from tradingagents.graph.trading_graph import TradingAgentsGraph
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -7,45 +10,117 @@ from tradingagents.default_config import DEFAULT_CONFIG
 TICKER = "NVDA"
 START_DATE = "2026-01-01"
 END_DATE = "2026-01-15"
-DECISION_INTERVAL_DAYS = 7  # Evaluate weekly to save on API token costs
+INITIAL_CAPITAL = 100000.0
+
+# 1. Fetch exact trading days and prices to match ReAct environment
+print(f"Prefetching historical data for {TICKER} from {START_DATE} to {END_DATE}...")
+df = yf.download(TICKER, start=START_DATE, end=END_DATE)
+if isinstance(df.columns, pd.MultiIndex):
+    df.columns = df.columns.droplevel(1)
+trading_days = [d.strftime('%Y-%m-%d') for d in df.index]
+
+if len(trading_days) < 6:
+    raise ValueError("Not enough trading days in this window to run a test.")
 
 # Initialize the Multi-Agent system
 config = DEFAULT_CONFIG.copy()
-config["llm_provider"] = "openai"  # or 'anthropic', 'deepseek', etc.
-# Pro-tip: Use cheaper mini models for testing so you don't burn API budget
-config["deep_think_llm"] = "gpt-4o-mini" 
+
+# Force framework to use your local vLLM A100 server
+config["llm_provider"] = "openai_compatible"
+config["llm_backend_url"] = "http://localhost:8000/v1"
+config["deep_think_llm"] = "Qwen/Qwen2.5-32B-Instruct"
+config["quick_think_llm"] = "Qwen/Qwen2.5-32B-Instruct"
 
 ta = TradingAgentsGraph(debug=False, config=config)
 
-# Generate list of evaluation dates
-current_dt = datetime.strptime(START_DATE, "%Y-%m-%d")
-end_dt = datetime.strptime(END_DATE, "%Y-%m-%d")
-dates_to_test = []
+# --- PORTFOLIO INITIALIZATION ---
+ai_cash = INITIAL_CAPITAL
+ai_shares = 0
 
-while current_dt <= end_dt:
-    dates_to_test.append(current_dt.strftime("%Y-%m-%d"))
-    current_dt += timedelta(days=DECISION_INTERVAL_DAYS)
+# Start on day 6 so agents have 5 days of history, identical to ReAct baseline
+first_trade_date = trading_days[5]
+first_day_price = float(df.loc[first_trade_date]['Close'])
+baseline_shares = INITIAL_CAPITAL / first_day_price
 
-print(f"Starting evaluation for {TICKER} across {len(dates_to_test)} intervals...")
+backtest_results = []
+print(f"\nStarting evaluation for {TICKER} across {len(trading_days[5:])} trading days...")
 
-# Run the evaluation loop
-results = {}
-for date in dates_to_test:
+# --- THE DAILY LOOP ---
+for date in trading_days[5:]:
     print(f"\n--- Evaluating Date: {date} ---")
+    current_price = float(df.loc[date]['Close'])
+    decision_str = "HOLD"
+    
     try:
-        # Propagate runs the entire agent debate/decision process for that historical slice
+        # Propagate runs the entire agent debate/decision process
         _, decision = ta.propagate(TICKER, date)
         
-        # Capture the portfolio manager's final rating (Buy, Sell, Hold, etc.)
-        results[date] = decision
-        print(f"Decision for {date}: {decision}")
-        
+        # Normalize the decision output to BUY/SELL/HOLD
+        # (Multi-agent frameworks often output verbose strings like "Strong Buy")
+        raw_decision = str(decision).upper()
+        if "BUY" in raw_decision:
+            decision_str = "BUY"
+        elif "SELL" in raw_decision:
+            decision_str = "SELL"
+            
     except Exception as e:
-        print(f"Error evaluating {date}: {e}")
+        print(f"Error evaluating {date}: {e}, defaulting to HOLD")
     
-    # Rest a bit to respect rate limits
-    time.sleep(2)
+    # Execute Trade
+    trade_action = "NONE"
+    if decision_str == "BUY" and ai_cash > 0:
+        shares_bought = ai_cash / current_price
+        ai_shares += shares_bought
+        ai_cash = 0
+        trade_action = f"BOUGHT {shares_bought:.2f} shares @ ${current_price:.2f}"
+        
+    elif decision_str == "SELL" and ai_shares > 0:
+        ai_cash += ai_shares * current_price
+        trade_action = f"SOLD {ai_shares:.2f} shares @ ${current_price:.2f}"
+        ai_shares = 0
+        
+    # Calculate daily portfolio value
+    ai_portfolio_value = ai_cash + (ai_shares * current_price)
+    baseline_value = baseline_shares * current_price
+    
+    # Log the financial result
+    backtest_results.append({
+        "date": date,
+        "decision": decision_str,
+        "price": current_price,
+        "trade_executed": trade_action,
+        "ai_portfolio_value": round(ai_portfolio_value, 2),
+        "baseline_value": round(baseline_value, 2),
+        "trajectory": f"Multi-Agent Final Output: {str(decision)}" # Replaces the ReAct thoughts
+    })
+    
+    print(f"Decision: {decision_str} | Portfolio: ${ai_portfolio_value:,.2f} | Action: {trade_action}")
+    time.sleep(1) # Let vLLM breathe
 
-print("\n=== Evaluation Complete ===")
-for date, decision in results.items():
-    print(f"{date}: {decision}")
+# --- FINAL PnL CALCULATION ---
+final_price = float(df.loc[trading_days[-1]]['Close'])
+final_ai_value = ai_cash + (ai_shares * final_price)
+final_baseline_value = baseline_shares * final_price
+
+ai_return_pct = ((final_ai_value - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+baseline_return_pct = ((final_baseline_value - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100
+
+print("\n" + "="*40)
+print("🏁 MULTI-AGENT BACKTEST COMPLETE 🏁")
+print("="*40)
+print(f"Initial Capital:  ${INITIAL_CAPITAL:,.2f}")
+print(f"AI Final Value:   ${final_ai_value:,.2f} ({ai_return_pct:+.2f}%)")
+print(f"Baseline Value:   ${final_baseline_value:,.2f} ({baseline_return_pct:+.2f}%)")
+
+# Save exact same JSON format
+with open("multi_agent_backtest_results.json", "w") as f:
+    json.dump({
+        "metrics": {
+            "ai_return_pct": round(ai_return_pct, 2),
+            "baseline_return_pct": round(baseline_return_pct, 2),
+            "beat_market": final_ai_value > final_baseline_value
+        },
+        "daily_logs": backtest_results
+    }, f, indent=4)
+    
+print("Saved PnL to multi_agent_backtest_results.json")
