@@ -5,12 +5,7 @@ from vllm import LLM, SamplingParams
 class StockRefiner:
     
     def __init__(self, llm: LLM, max_refinements: int = 3, temperature: float = 0.3):
-        """
-        Args:
-            llm: vLLM model instance
-            max_refinements: Number of refinement iterations
-            temperature: Sampling temperature for generation
-        """
+        
         self.llm = llm
         self.max_refinements = max_refinements
         self.temperature = temperature
