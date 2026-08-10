@@ -197,7 +197,7 @@ def plot_multi_asset_portfolio(input_json: str, output_png: str):
 if __name__ == "__main__":
     targets = [
         ("react_results_plain_portfolio.json", "MultiAsset_Plain_Performance.png"),
-        # ("react_results_harness_portfolio.json", "MultiAsset_Harness_Performance.png")
+        ("react_results_harness_portfolio.json", "MultiAsset_Harness_Performance.png")
     ]
     for json_file, png_file in targets:
         plot_multi_asset_portfolio(json_file, png_file)

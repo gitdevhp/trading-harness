@@ -5,24 +5,25 @@ import pandas as pd
 import yfinance as yf
 from openai import OpenAI
 
-# Connect to the background vLLM server launched by Slurm
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
 MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct-AWQ"
 
-UNIVERSE = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ"]
+RAW_UNIVERSE = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ"]
+
+# Anonymization Mapping to Eliminate Hindsight Bias
+ANONYMOUS_MAP = {ticker: f"ASSET_{chr(65+i)}" for i, ticker in enumerate(RAW_UNIVERSE)}
+REVERSE_MAP = {v: k for k, v in ANONYMOUS_MAP.items()}
+ANONYMOUS_UNIVERSE = list(ANONYMOUS_MAP.values())
+
 GLOBAL_DATA_CACHE = {}
 
-# ==========================================
-# 1. DATA PREFETCHING & TECHNICAL ANALYSIS
-# ==========================================
 def prefetch_data(start_date: str, end_date: str):
     lookback_start = (pd.to_datetime(start_date) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
-    print(f"Prefetching universe data from {lookback_start} to {end_date}...")
-    for ticker in UNIVERSE:
+    for ticker in RAW_UNIVERSE:
         df = yf.download(ticker, start=lookback_start, end=end_date, auto_adjust=True)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-        GLOBAL_DATA_CACHE[ticker] = df
+        GLOBAL_DATA_CACHE[ANONYMOUS_MAP[ticker]] = df
 
 def calculate_technical_indicators(past_df: pd.DataFrame) -> dict:
     closes = past_df['Close']
@@ -32,206 +33,154 @@ def calculate_technical_indicators(past_df: pd.DataFrame) -> dict:
     mom14 = ((current_p - float(closes.iloc[-14])) / float(closes.iloc[-14])) * 100 if len(closes) >= 14 else 0.0
     vol20 = (closes.tail(20).std() / sma20) * 100 if len(closes) >= 20 else 0.0
 
-    if len(closes) >= 15:
-        delta = closes.diff()
-        gain = (delta.where(delta > 0, 0)).tail(14).mean()
-        loss = (-delta.where(delta < 0, 0)).tail(14).mean()
-        rsi = 100.0 if loss == 0 else 100.0 - (100.0 / (1.0 + (gain / loss)))
-    else:
-        rsi = 50.0
-
     return {
         "price": round(current_p, 2),
         "sma20": round(sma20, 2),
         "sma50": round(sma50, 2),
-        "rsi14": round(rsi, 1),
         "momentum14_pct": round(mom14, 2),
         "volatility20_pct": round(vol20, 2)
     }
 
-# ==========================================
-# 2. STRATEGY HARNESS RISK INTERCEPTOR
-# ==========================================
+# Dynamic Risk Interceptor
 def apply_portfolio_harness_rules(raw_allocations: dict, current_allocations: dict, current_date: str) -> dict:
-    """Strategy Harness enforcing concentration limits, oversold protections, and cash floors."""
     sanitized = {}
+    bullish_count = 0
 
-    # Rule 1: Anti-Panic Oversold Guardrail (If RSI < 32, prevent dumping holdings)
-    for ticker in UNIVERSE:
-        raw_weight = float(raw_allocations.get(ticker, 0.0))
-        current_weight = float(current_allocations.get(ticker, 0.0))
-        past_df = GLOBAL_DATA_CACHE[ticker].loc[:current_date]
+    # Rule 1: Trailing Stop & Trend Override
+    for asset in ANONYMOUS_UNIVERSE:
+        past_df = GLOBAL_DATA_CACHE[asset].loc[:current_date]
         tech = calculate_technical_indicators(past_df)
+        raw_weight = float(raw_allocations.get(asset, 0.0))
+        
+        # Track market regime
+        if tech['price'] > tech['sma20']:
+            bullish_count += 1
 
-        if tech['rsi14'] < 32.0 and raw_weight < current_weight:
-            sanitized[ticker] = current_weight  # Block bottom-selling
+        # Hard Risk Override: Force allocation to 0% if asset breaks below 50d SMA and has negative momentum
+        if tech['price'] < tech['sma50'] and tech['momentum14_pct'] < -3.0:
+            sanitized[asset] = 0.0
         else:
-            sanitized[ticker] = raw_weight
+            sanitized[asset] = raw_weight
 
-    # Rule 2: Single-Asset Concentration Cap (Max 30% per stock)
-    for ticker in UNIVERSE:
-        sanitized[ticker] = min(30.0, sanitized[ticker])
+    # Rule 2: Regime-Adaptive Cash Floor (0% in strong bull markets, up to 25% in bear markets)
+    market_health_ratio = bullish_count / len(ANONYMOUS_UNIVERSE)
+    min_cash_floor = 0.0 if market_health_ratio >= 0.6 else (25.0 * (1.0 - market_health_ratio))
 
-    # Rule 3: Minimum Cash Floor (Enforce 15% Cash minimum)
-    total_stock_weight = sum(sanitized[t] for t in UNIVERSE)
-    if total_stock_weight > 85.0:
-        scale_factor = 85.0 / total_stock_weight
-        for t in UNIVERSE:
+    # Rule 3: Single Asset Concentration Cap (Max 35%)
+    for asset in ANONYMOUS_UNIVERSE:
+        sanitized[asset] = min(35.0, sanitized[asset])
+
+    # Rule 4: Churn Buffer (Ignore tiny reallocation adjustments under 3%)
+    for asset in ANONYMOUS_UNIVERSE:
+        curr_w = float(current_allocations.get(asset, 0.0))
+        if abs(sanitized[asset] - curr_w) < 3.0:
+            sanitized[asset] = curr_w
+
+    total_stock_weight = sum(sanitized[t] for t in ANONYMOUS_UNIVERSE)
+    max_equity_allowed = 100.0 - min_cash_floor
+
+    if total_stock_weight > max_equity_allowed and total_stock_weight > 0:
+        scale_factor = max_equity_allowed / total_stock_weight
+        for t in ANONYMOUS_UNIVERSE:
             sanitized[t] *= scale_factor
-        sanitized["CASH"] = 15.0
+        sanitized["CASH"] = min_cash_floor
     else:
-        sanitized["CASH"] = max(15.0, 100.0 - total_stock_weight)
+        sanitized["CASH"] = 100.0 - sum(sanitized[t] for t in ANONYMOUS_UNIVERSE)
 
-    # Normalize to 100%
     total = sum(sanitized.values())
     return {k: round((v / total) * 100.0, 2) for k, v in sanitized.items()}
 
-# ==========================================
-# 3. DAILY ReAct AGENT WITH HARNESS
-# ==========================================
 def run_daily_agent(current_date: str, portfolio_state: dict) -> dict:
-    
     def get_market_screener(arg: str = "") -> str:
         screener = []
-        for ticker in UNIVERSE:
-            past_df = GLOBAL_DATA_CACHE[ticker].loc[:current_date]
+        for asset in ANONYMOUS_UNIVERSE:
+            past_df = GLOBAL_DATA_CACHE[asset].loc[:current_date]
             tech = calculate_technical_indicators(past_df)
-            screener.append(
-                f"{ticker}: Price=${tech['price']} | 20d-SMA=${tech['sma20']} | "
-                f"RSI={tech['rsi14']} | 14d-Mom={tech['momentum14_pct']}% | Vol={tech['volatility20_pct']}%"
-            )
+            screener.append(f"{asset}: Price=${tech['price']} | 20d-SMA=${tech['sma20']} | 50d-SMA=${tech['sma50']} | 14d-Mom={tech['momentum14_pct']}%")
         return "\n".join(screener)
 
     def get_portfolio_status(arg: str = "") -> str:
         alloc_str = ", ".join([f"{k}: {v:.1f}%" for k, v in portfolio_state['allocations_pct'].items()])
-        return (f"Total Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
-                f"Cash: ${portfolio_state['cash']:,.2f} ({portfolio_state['cash_pct']:.1f}%)\n"
-                f"Current Equity Allocations: {alloc_str}")
+        return f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | Cash: {portfolio_state['cash_pct']:.1f}%\nAllocations: {alloc_str}"
 
-    available_tools = {
-        "get_market_screener": get_market_screener,
-        "get_portfolio_status": get_portfolio_status
-    }
+    available_tools = {"get_market_screener": get_market_screener, "get_portfolio_status": get_portfolio_status}
 
     react_system_prompt = f"""You are an autonomous quantitative portfolio manager evaluating market opportunities on {current_date}.
 
-Available Universe: {UNIVERSE} + CASH
+Available Assets: {ANONYMOUS_UNIVERSE} + CASH
 
 Available Tools:
-- get_market_screener[]: Get technicals (RSI, 14d Momentum, SMAs, Volatility) for all tickers in the universe.
-- get_portfolio_status[]: Fetch current cash, portfolio value, and asset exposure percentages.
-
-Goal: Maximize long-term risk-adjusted returns by shifting capital into higher-opportunity assets while managing downside risks.
-
-Guidelines for Reasoning:
-- Compare cross-sectional relative strength: allocate higher weights to assets with positive momentum and healthy setups.
-- Reduce allocation to weakening or high-volatility assets.
-- Total portfolio allocations across selected stocks and CASH MUST sum strictly to 100%.
+- get_market_screener[]: Fetch quantitative metrics (Prices, SMAs, Momentum) for all anonymized assets.
+- get_portfolio_status[]: Fetch current cash and asset allocations.
 
 Output Format:
-Thought: <Analyze cross-sectional indicators and explain portfolio weighting shifts>
+Thought: <Analyze cross-sectional momentum and market health>
 Action: <tool_name>[]
 Observation: <result>
 ... (repeat Thought/Action/Observation as needed)
-Thought: <Declare final optimal portfolio target weights>
-Action: Target_Allocations[{{\"AAPL\": 10, \"NVDA\": 25, \"MSFT\": 15, \"AMZN\": 0, \"GOOGL\": 0, \"META\": 15, \"TSLA\": 0, \"JPM\": 10, \"XOM\": 10, \"JNJ\": 0, \"CASH\": 15}}]"""
+Thought: <Declare final target weights>
+Action: Target_Allocations[{{\"ASSET_A\": 15, \"ASSET_B\": 25, \"ASSET_C\": 15, \"ASSET_D\": 10, \"ASSET_E\": 10, \"ASSET_F\": 10, \"ASSET_G\": 0, \"ASSET_H\": 5, \"ASSET_I\": 5, \"ASSET_J\": 0, \"CASH\": 5}}]"""
 
-    messages = [
-        {"role": "system", "content": react_system_prompt},
-        {"role": "user", "content": f"Today is {current_date}. Evaluate the market universe and output your target portfolio allocation."}
-    ]
-
-    trajectory_log = []
-    raw_decision = {"CASH": 100.0}
+    messages = [{"role": "system", "content": react_system_prompt}, {"role": "user", "content": f"Date: {current_date}. Output your target allocations."}]
+    trajectory_log, raw_decision = [], {"CASH": 100.0}
 
     for step in range(5):
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            temperature=0.0,
-            max_tokens=450,
-            stop=["Observation:"]
-        )
+        response = client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=0.0, max_tokens=400, stop=["Observation:"])
         reply = response.choices[0].message.content.strip()
         trajectory_log.append(reply)
         messages.append({"role": "assistant", "content": reply})
 
         action_match = re.search(r"Action:\s*(\w+)\[(.*?)\]", reply, re.DOTALL)
         if action_match:
-            action_name = action_match.group(1)
-            action_arg = action_match.group(2).strip()
-
+            action_name, action_arg = action_match.group(1), action_match.group(2).strip()
             if action_name == "Target_Allocations":
                 try:
-                    parsed = json.loads(action_arg)
-                    raw_decision = {k: float(v) for k, v in parsed.items()}
+                    raw_decision = {k: float(v) for k, v in json.loads(action_arg).items()}
                 except Exception:
                     pass
                 break
-
             if action_name in available_tools:
                 obs_text = f"Observation: {available_tools[action_name](action_arg)}"
             else:
                 obs_text = f"Observation: Tool '{action_name}' not found."
-
             trajectory_log.append(obs_text)
             messages.append({"role": "user", "content": obs_text})
 
     return {"date": current_date, "raw_allocations": raw_decision, "trajectory": "\n".join(trajectory_log)}
 
-# ==========================================
-# 4. MULTI-ASSET BACKTEST ENGINE
-# ==========================================
 def run_backtest(start_date: str, end_date: str, initial_capital: float = 100000.0):
     prefetch_data(start_date, end_date)
-    trading_days = [d.strftime('%Y-%m-%d') for d in GLOBAL_DATA_CACHE[UNIVERSE[0]].index if d.strftime('%Y-%m-%d') >= start_date]
+    trading_days = [d.strftime('%Y-%m-%d') for d in GLOBAL_DATA_CACHE[ANONYMOUS_UNIVERSE[0]].index if d.strftime('%Y-%m-%d') >= start_date]
 
     cash = initial_capital
-    holdings = {t: 0.0 for t in UNIVERSE}
-    output_filename = "react_results_harness_portfolio.json"
+    holdings = {t: 0.0 for t in ANONYMOUS_UNIVERSE}
     backtest_results = []
 
     for current_date in trading_days:
-        prices = {t: float(GLOBAL_DATA_CACHE[t].loc[current_date]['Close']) for t in UNIVERSE}
-        total_portfolio_value = cash + sum(holdings[t] * prices[t] for t in UNIVERSE)
+        prices = {t: float(GLOBAL_DATA_CACHE[t].loc[current_date]['Close']) for t in ANONYMOUS_UNIVERSE}
+        total_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
+        allocations_pct = {t: (holdings[t] * prices[t] / total_value * 100.0) for t in ANONYMOUS_UNIVERSE}
 
-        allocations_pct = {t: (holdings[t] * prices[t] / total_portfolio_value * 100.0) for t in UNIVERSE}
-        cash_pct = (cash / total_portfolio_value) * 100.0
-
-        portfolio_state = {
-            "cash": cash,
-            "cash_pct": cash_pct,
-            "portfolio_value": total_portfolio_value,
-            "allocations_pct": allocations_pct
-        }
-
+        portfolio_state = {"cash": cash, "cash_pct": (cash / total_value) * 100.0, "portfolio_value": total_value, "allocations_pct": allocations_pct}
+        
         result = run_daily_agent(current_date, portfolio_state)
-        raw_targets = result["raw_allocations"]
+        harnessed_targets = apply_portfolio_harness_rules(result["raw_allocations"], allocations_pct, current_date)
 
-        # Intercept raw targets using Strategy Harness
-        harnessed_targets = apply_portfolio_harness_rules(raw_targets, allocations_pct, current_date)
-
-        # Portfolio Rebalance Execution
         norm_targets = {k: (v / 100.0) for k, v in harnessed_targets.items()}
-        cash = total_portfolio_value * norm_targets.get("CASH", 0.0)
+        cash = total_value * norm_targets.get("CASH", 0.0)
 
-        for t in UNIVERSE:
-            target_cash_for_asset = total_portfolio_value * norm_targets.get(t, 0.0)
-            holdings[t] = target_cash_for_asset / prices[t]
+        for t in ANONYMOUS_UNIVERSE:
+            holdings[t] = (total_value * norm_targets.get(t, 0.0)) / prices[t]
 
-        new_portfolio_value = cash + sum(holdings[t] * prices[t] for t in UNIVERSE)
-
-        result.update({
-            "portfolio_value": round(new_portfolio_value, 2),
-            "harnessed_allocations": harnessed_targets
-        })
+        new_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
+        
+        # Convert anonymous tags back to real tickers for output log transparency
+        real_executed = {REVERSE_MAP.get(k, k): v for k, v in harnessed_targets.items()}
+        
+        result.update({"portfolio_value": round(new_value, 2), "executed_allocations": real_executed})
         backtest_results.append(result)
 
-        if len(backtest_results) % 10 == 0 or current_date == trading_days[-1]:
-            with open(output_filename, "w") as f:
-                json.dump(backtest_results, f, indent=4)
-
-        print(f"[{current_date}] Portfolio Value: ${new_portfolio_value:,.2f} | Harnessed Allocations: {harnessed_targets}")
+        print(f"[{current_date}] Portfolio Value: ${new_value:,.2f} | Real Executed Allocations: {real_executed}")
 
 if __name__ == "__main__":
     run_backtest(start_date="2023-03-15", end_date="2026-04-01")
