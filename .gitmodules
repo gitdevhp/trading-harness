@@ -1,0 +1,3 @@
+[submodule "ai_hedge_fund_backend"]
+	path = ai_hedge_fund_backend
+	url = https://github.com/virattt/ai-hedge-fund.git
