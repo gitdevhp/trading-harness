@@ -48,110 +48,120 @@ def prefetch_data(start_date: str, end_date: str):
             df = df.dropna(subset=required_cols)
         GLOBAL_DATA_CACHE[ANONYMOUS_MAP[ticker]] = df
 
+
+
+PORTFOLIO_PEAK_VALUE = 0.0
+
 def calculate_technical_indicators(past_df: pd.DataFrame) -> dict:
-    closes = past_df["Close"]
-    current_p = float(closes.iloc[-1])
+    closes = past_df['Close'].astype(float)
+    price = float(closes.iloc[-1])
+    sma20 = float(closes.tail(20).mean()) if len(closes) >= 20 else price
+    sma50 = float(closes.tail(50).mean()) if len(closes) >= 50 else price
+    sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else price
+    def mom(n):
+        if len(closes) <= n: return 0.0
+        base = float(closes.iloc[-n-1])
+        return ((price/base)-1)*100 if base else 0.0
+    m20,m60,m120=mom(20),mom(60),mom(120)
+    r=closes.pct_change().dropna().tail(60)
+    vol=float(r.std(ddof=1)*np.sqrt(252)) if len(r)>=20 else 0.20
+    neg=r[r<0]
+    dvol=float(np.sqrt(np.mean(neg**2))*np.sqrt(252)) if len(neg)>=6 else max(vol*0.7,0.05)
+    peak=float(closes.tail(252).max()) if len(closes)>=20 else price
+    dd=price/peak-1 if peak>0 else 0.0
+    momentum=float(np.clip(0.2*np.clip(m20/12,-1,1)+0.35*np.clip(m60/25,-1,1)+0.45*np.clip(m120/40,-1,1),-1,1))
+    trend=float(np.clip(0.45*np.clip(((price/max(sma50,1e-9))-1)/0.15,-1,1)+0.55*np.clip(((sma50/max(sma200,1e-9))-1)/0.15,-1,1),-1,1))
+    return {'price':round(price,2),'sma20':round(sma20,2),'sma50':round(sma50,2),'sma200':round(sma200,2),'momentum20_pct':round(m20,2),'momentum60_pct':round(m60,2),'momentum120_pct':round(m120,2),'annual_volatility':max(vol,0.04),'downside_volatility':max(dvol,0.025),'drawdown':float(dd),'momentum_score':momentum,'trend_score':trend}
 
-    sma50 = float(closes.tail(50).mean()) if len(closes) >= 50 else current_p
-    sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else current_p
-    mom120 = ((current_p - float(closes.iloc[-120])) / float(closes.iloc[-120])) * 100.0 if len(closes) >= 120 else 0.0
 
-    daily_returns = closes.pct_change().tail(60).dropna()
-    total_vol = float(daily_returns.std() * np.sqrt(252)) if len(daily_returns) >= 20 else 0.20
+def _portfolio_vol(targets: dict, current_date: str) -> float:
+    frames=[]
+    for a in ANONYMOUS_UNIVERSE:
+        frames.append(GLOBAL_DATA_CACHE[a].loc[:current_date]['Close'].astype(float).pct_change().dropna().tail(126).rename(a))
+    if not frames: return 0.20
+    ret=pd.concat(frames,axis=1,join='inner').dropna()
+    if len(ret)<40: return 0.20
+    cov=ret.cov().values*252.0
+    cov=0.75*cov+0.25*np.diag(np.diag(cov))
+    w=np.array([max(0,float(targets.get(a,0)))/100 for a in ANONYMOUS_UNIVERSE])
+    return float(np.sqrt(max(w@cov@w,1e-10)))
 
-    downside_returns = daily_returns[daily_returns < 0]
-    downside_std = (
-        float(np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252))
-        if len(downside_returns) > 5 else max(total_vol * 0.7, 0.05)
-    )
 
-    return {
-        "price": round(current_p, 2),
-        "sma50": round(sma50, 2),
-        "sma200": round(sma200, 2),
-        "momentum120_pct": round(mom120, 2),
-        "annual_volatility": max(total_vol, 0.05),
-        "downside_volatility": max(downside_std, 0.03),
-    }
+def _conviction_overlay(raw_allocations: dict,current_date: str) -> dict:
+    tech={a:calculate_technical_indicators(GLOBAL_DATA_CACHE[a].loc[:current_date]) for a in ANONYMOUS_UNIVERSE}
+    med=float(np.median([tech[a]['downside_volatility'] for a in ANONYMOUS_UNIVERSE])) if ANONYMOUS_UNIVERSE else 0.15
+    med=max(med,0.05)
+    out={}
+    for a in ANONYMOUS_UNIVERSE:
+        raw=max(0.0,float(raw_allocations.get(a,0.0)))
+        if raw<=0: out[a]=0.0; continue
+        t=tech[a]
+        mult=1.0+0.10*t['momentum_score']+0.08*t['trend_score']
+        mult*=float(np.clip(1.0-0.08*(t['downside_volatility']/med-1.0),0.84,1.08))
+        if t['momentum_score']>0.45 and t['trend_score']>0.25 and t['drawdown']>-0.12: mult*=1.05
+        if t['momentum_score']<-0.35 and t['trend_score']<-0.20: mult*=0.84
+        elif t['momentum_score']<-0.15 and t['trend_score']<0: mult*=0.92
+        out[a]=raw*float(np.clip(mult,0.75,1.25))
+    return out
 
-def apply_institutional_risk_harness(
-    raw_allocations: dict,
-    current_allocations: dict,
-    current_date: str,
-    holdings_prices: dict,
-    drift_threshold: float = 2.0,
-    max_asset_cap_pct: float = 20.0,
-) -> dict:
-    stopped_out = set()
-    tech_cache = {}
 
-    for asset in ANONYMOUS_UNIVERSE:
-        past_df = GLOBAL_DATA_CACHE[asset].loc[:current_date]
-        tech_cache[asset] = calculate_technical_indicators(past_df)
+def _apply_risk_target(targets: dict,current_date: str) -> dict:
+    vol=_portfolio_vol(targets,current_date)
+    if vol<=0.215: return dict(targets)
+    scale=float(np.clip(0.215/max(vol,0.05),0.80,1.0))
+    return {a:max(0.0,float(targets.get(a,0.0)))*scale for a in ANONYMOUS_UNIVERSE}
 
-    # 1. Trailing Stop-Loss Check (8% - 15% dynamic stop)
-    for asset in ANONYMOUS_UNIVERSE:
-        price = holdings_prices[asset]
-        curr_hold_pct = current_allocations.get(asset, 0.0)
-        tech = tech_cache[asset]
-        
-        dynamic_stop_loss = float(np.clip(1.2 * tech["annual_volatility"], 0.08, 0.15))
 
-        if curr_hold_pct > 0.5:
-            if asset not in POSITION_PEAKS or price > POSITION_PEAKS[asset]:
-                POSITION_PEAKS[asset] = price
-            peak = POSITION_PEAKS[asset]
-            drawdown = (price - peak) / peak if peak > 0 else 0.0
-            if drawdown <= -dynamic_stop_loss:
-                stopped_out.add(asset)
-                POSITION_PEAKS.pop(asset, None)
-        else:
-            POSITION_PEAKS.pop(asset, None)
+def _apply_breadth_overlay(targets: dict,current_date: str) -> dict:
+    tech={a:calculate_technical_indicators(GLOBAL_DATA_CACHE[a].loc[:current_date]) for a in ANONYMOUS_UNIVERSE}
+    breadth=sum(tech[a]['price']>=tech[a]['sma200'] for a in ANONYMOUS_UNIVERSE)/max(len(ANONYMOUS_UNIVERSE),1)
+    scale=1.0 if breadth>=0.55 else 0.97 if breadth>=0.40 else 0.90 if breadth>=0.25 else 0.80
+    return {a:max(0.0,float(targets.get(a,0.0)))*scale for a in ANONYMOUS_UNIVERSE}
 
-    # 2. Portfolio Market Breadth Regime Scale
-    healthy_assets = sum(1 for a in ANONYMOUS_UNIVERSE if tech_cache[a]["price"] >= tech_cache[a]["sma200"])
-    breadth_ratio = healthy_assets / len(ANONYMOUS_UNIVERSE) if ANONYMOUS_UNIVERSE else 1.0
-    
-    macro_exposure_scale = 1.0 if breadth_ratio >= 0.6 else max(0.2, breadth_ratio)
 
-    # 3. Filter Individual Asset Allocations
-    filtered_targets = {}
-    for asset in ANONYMOUS_UNIVERSE:
-        requested_w = float(raw_allocations.get(asset, 0.0))
+def _apply_conditional_stops(targets: dict,current_allocations: dict,current_date: str,prices: dict) -> dict:
+    out=dict(targets)
+    for a in ANONYMOUS_UNIVERSE:
+        cw=float(current_allocations.get(a,0.0))
+        if cw<=0.5: POSITION_PEAKS.pop(a,None); continue
+        p=float(prices[a])
+        POSITION_PEAKS[a]=max(p,float(POSITION_PEAKS.get(a,p)))
+        dd=p/POSITION_PEAKS[a]-1 if POSITION_PEAKS[a]>0 else 0.0
+        t=calculate_technical_indicators(GLOBAL_DATA_CACHE[a].loc[:current_date])
+        stop=float(np.clip(1.35*t['annual_volatility'],0.10,0.22))
+        breakdown=p<t['sma50'] and t['momentum60_pct']<-3 and t['trend_score']<-0.25
+        severe=dd<=-max(0.22,stop*1.35)
+        if dd<=-stop and (breakdown or severe): out[a]=0.0; POSITION_PEAKS.pop(a,None)
+    return out
 
-        if asset in stopped_out or requested_w <= 0:
-            filtered_targets[asset] = 0.0
-            continue
 
-        tech = tech_cache[asset]
-        w = min(requested_w, max_asset_cap_pct)
+def _apply_portfolio_drawdown_guard(targets: dict,portfolio_value: float) -> dict:
+    global PORTFOLIO_PEAK_VALUE
+    PORTFOLIO_PEAK_VALUE=max(PORTFOLIO_PEAK_VALUE,portfolio_value)
+    if PORTFOLIO_PEAK_VALUE<=0: return dict(targets)
+    dd=portfolio_value/PORTFOLIO_PEAK_VALUE-1
+    scale=1.0 if dd>-0.12 else 0.96 if dd>-0.18 else 0.88 if dd>-0.24 else 0.78 if dd>-0.30 else 0.65
+    return {a:max(0.0,float(targets.get(a,0.0)))*scale for a in ANONYMOUS_UNIVERSE}
 
-        if tech["price"] < tech["sma200"]:
-            w *= 0.5
-        if tech["momentum120_pct"] < 0:
-            w *= 0.5
 
-        w *= macro_exposure_scale
-        filtered_targets[asset] = round(w, 2)
-
-    # 4. Strict Cash Diversion
-    allocated_equity = sum(filtered_targets.values())
-    final_targets = filtered_targets.copy()
-
-    if allocated_equity > 100.0:
-        norm_factor = 100.0 / allocated_equity
-        final_targets = {k: round(v * norm_factor, 2) for k, v in final_targets.items()}
-        final_targets["CASH"] = 0.0
-    else:
-        final_targets["CASH"] = round(max(0.0, 100.0 - allocated_equity), 2)
-
-    # 5. Rebalance Drift Filter
-    if not stopped_out:
-        max_drift = max([abs(final_targets.get(a, 0.0) - current_allocations.get(a, 0.0)) for a in ANONYMOUS_UNIVERSE])
-        if max_drift < drift_threshold:
-            return current_allocations
-
-    return final_targets
+def apply_institutional_risk_harness(raw_allocations: dict,current_allocations: dict,current_date: str,holdings_prices: dict,portfolio_value: float=0.0,drift_threshold: float=2.5,max_asset_cap_pct: float=35.0) -> dict:
+    # The LLM is the alpha engine. This harness is intentionally an overlay.
+    targets=_conviction_overlay(raw_allocations,current_date)
+    targets=_apply_risk_target(targets,current_date)
+    targets=_apply_breadth_overlay(targets,current_date)
+    targets=_apply_conditional_stops(targets,current_allocations,current_date,holdings_prices)
+    if portfolio_value>0: targets=_apply_portfolio_drawdown_guard(targets,portfolio_value)
+    for a in ANONYMOUS_UNIVERSE: targets[a]=min(max(0.0,float(targets.get(a,0.0))),max_asset_cap_pct)
+    gross=sum(targets.get(a,0.0) for a in ANONYMOUS_UNIVERSE)
+    if gross>100:
+        f=100/gross
+        for a in ANONYMOUS_UNIVERSE: targets[a]*=f
+        gross=100.0
+    targets['CASH']=round(max(0.0,100-gross),2)
+    targets={k:round(float(v),2) for k,v in targets.items()}
+    drift=max([abs(targets.get(a,0.0)-current_allocations.get(a,0.0)) for a in ANONYMOUS_UNIVERSE],default=0.0)
+    forced=any(current_allocations.get(a,0.0)-targets.get(a,0.0)>=8 for a in ANONYMOUS_UNIVERSE)
+    return current_allocations if drift<drift_threshold and not forced else targets
 
 def get_market_screener(current_date: str) -> str:
     screener = []
@@ -176,6 +186,21 @@ def run_react_agent(current_date: str, portfolio_state: dict) -> dict:
     system_prompt = f"""You are an autonomous ReAct Portfolio Manager on {current_date}.
 Assets: {ANONYMOUS_UNIVERSE} + CASH
 
+Primary objective:
+Maximize long-term compounded return while maintaining strong risk-adjusted performance.
+Prioritize CAGR/profit first, then Sortino, Calmar, and Sharpe, while controlling maximum drawdown.
+Do not default to cash or minimum-volatility portfolios.
+
+Decision principles:
+- Use strong conviction when price, momentum, trend, and portfolio diversification support it.
+- Do not punish an asset merely because it is volatile; distinguish upside volatility from harmful downside risk.
+- Favor asymmetric upside and improving trend/momentum.
+- Avoid chasing assets solely because they recently rose sharply.
+- Avoid buying an asset solely because it is down.
+- Treat CASH as a tactical allocation, not a default safety allocation.
+- Think about the whole portfolio: expected return, correlation, concentration, downside risk, and drawdown.
+- When two opportunities are similar, prefer the one with better Sortino/Calmar and lower drawdown.
+
 Tools:
 - get_market_screener[]
 - get_portfolio_status[]
@@ -187,6 +212,7 @@ Observation: <tool response>
 ...
 Thought: <Final allocation decision>
 Action: Target_Allocations[{{\"ASSET_A\": 15, \"ASSET_B\": 15, ..., \"CASH\": 10}}]"""
+
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -231,7 +257,9 @@ def run_backtest(
     if tickers is None or len(tickers) == 0:
         tickers = DEFAULT_UNIVERSE
 
+    global PORTFOLIO_PEAK_VALUE
     setup_universe(tickers)
+    PORTFOLIO_PEAK_VALUE = float(initial_capital)
     prefetch_data(start_date, end_date)
 
     trading_days = [
@@ -376,4 +404,4 @@ if __name__ == "__main__":
         end_date=args.end,
         tickers=args.tickers,
         output_file=args.output
-    ) 
+    )

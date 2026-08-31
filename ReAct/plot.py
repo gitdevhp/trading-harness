@@ -1,247 +1,330 @@
-import os
 import json
+import os
+import re
+import sys
+import matplotlib
 import numpy as np
 import pandas as pd
-import matplotlib
-# Non-interactive backend so it runs smoothly on HPC / Slurm nodes
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+
+# Non-interactive backend for Slurm / HPC runners
+matplotlib.use("Agg")
 import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+
+ANONYMOUS_MAP = {
+    "ASSET_A": "AAPL",
+    "ASSET_B": "NVDA",
+    "ASSET_C": "MSFT",
+    "ASSET_D": "AMZN",
+    "ASSET_E": "GOOGL",
+    "ASSET_F": "META",
+    "ASSET_G": "TSLA",
+    "ASSET_H": "JPM",
+    "ASSET_I": "XOM",
+    "ASSET_J": "JNJ",
+}
+
 
 def compute_drawdown(series: pd.Series) -> pd.Series:
+    """Computes daily peak-to-trough percentage drawdown."""
     peak = series.cummax()
     return (series - peak) / peak * 100.0
 
-def compute_sharpe(daily_returns: pd.Series, risk_free_rate: float = 0.04) -> float:
-    rf_daily = risk_free_rate / 252
-    excess = daily_returns - rf_daily
-    if excess.std() == 0 or np.isnan(excess.std()):
+
+def compute_cagr(series: pd.Series) -> float:
+    """Computes Compound Annual Growth Rate (CAGR)."""
+    n_days = len(series)
+    if n_days < 2:
         return 0.0
-    return np.sqrt(252) * (excess.mean() / excess.std())
+    total_return = (series.iloc[-1] / series.iloc[0]) - 1.0
+    return (1.0 + total_return) ** (252.0 / n_days) - 1.0
 
-def plot_scientific_performance(input_json: str, output_png: str, rolling_window: int = 21):
-    # Fallback check for alternate file naming conventions
-    if not os.path.exists(input_json):
-        alt_json = input_json.replace("react_results_", "react_results_high_growth_")
-        if os.path.exists(alt_json):
-            input_json = alt_json
-        else:
-            print(f"❌ Error: Could not find '{input_json}'.")
-            return
 
-    # Load JSON output from backtester
-    with open(input_json, 'r') as f:
-        raw_data = json.load(f)
+def compute_sharpe(daily_returns: pd.Series, risk_free_rate: float = 0.04) -> float:
+    """Computes Annualized Sharpe Ratio."""
+    rf_daily = risk_free_rate / 252.0
+    excess = daily_returns - rf_daily
+    std = excess.std()
+    if std == 0 or np.isnan(std):
+        return 0.0
+    return np.sqrt(252.0) * (excess.mean() / std)
 
-    # Parse JSON list structure directly or extract daily_logs if nested dict
-    metrics = {}
-    if isinstance(raw_data, list):
-        daily_logs = raw_data
-    elif isinstance(raw_data, dict):
-        metrics = raw_data.get("metrics", {})
+
+def compute_sortino(daily_returns: pd.Series, risk_free_rate: float = 0.04) -> float:
+    """Computes Annualized Sortino Ratio using downside deviation."""
+    rf_daily = risk_free_rate / 252.0
+    excess = daily_returns - rf_daily
+    downside_returns = excess[excess < 0]
+    if len(downside_returns) == 0:
+        return 0.0
+    downside_std = np.sqrt(np.mean(np.square(downside_returns)))
+    if downside_std == 0 or np.isnan(downside_std):
+        return 0.0
+    return np.sqrt(252.0) * (excess.mean() / downside_std)
+
+
+def compute_calmar(series: pd.Series, risk_free_rate: float = 0.04) -> float:
+    """Computes Calmar Ratio (CAGR / Absolute Max Drawdown)."""
+    cagr = compute_cagr(series)
+    mdd_pct = abs(compute_drawdown(series).min()) / 100.0
+    if mdd_pct == 0 or np.isnan(mdd_pct):
+        return 0.0
+    return cagr / mdd_pct
+
+
+def extract_asset_prices(df: pd.DataFrame) -> pd.DataFrame:
+    """Extracts asset daily close prices from 'prices' dict or parses 'trajectory' logs."""
+    price_records = []
+
+    for idx, row in df.iterrows():
+        prices = {}
+        # 1. Direct prices payload
+        if "prices" in row and isinstance(row["prices"], dict):
+            prices = row["prices"]
+        # 2. Extract from trajectory log text
+        elif "trajectory" in row and isinstance(row["trajectory"], str):
+            matches = re.findall(
+                r"([A-Z0-9_]+):\s*Price=\$?([0-9\.]+)", row["trajectory"]
+            )
+            for asset, p_val in matches:
+                ticker = ANONYMOUS_MAP.get(asset, asset)
+                prices[ticker] = float(p_val)
+
+        price_records.append(prices)
+
+    prices_df = pd.DataFrame(price_records, index=df.index).apply(
+        pd.to_numeric, errors="coerce"
+    )
+    valid_cols = [c for c in prices_df.columns if prices_df[c].notna().any()]
+    if valid_cols:
+        return prices_df[valid_cols].ffill().bfill()
+    return pd.DataFrame(index=df.index)
+
+
+def plot_comparative_performance(
+    json_files: list, output_png: str = "comparative_performance.png"
+):
+    dfs = {}
+    price_panels = {}
+
+    for file_path in json_files:
+        if not os.path.exists(file_path):
+            print(f"⚠️ Warning: File '{file_path}' not found. Skipping.")
+            continue
+
+        with open(file_path, "r") as f:
+            raw_data = json.load(f)
+
         daily_logs = (
-            raw_data.get("daily_logs") 
-            or raw_data.get("daily_log") 
-            or raw_data.get("results") 
-            or []
+            raw_data
+            if isinstance(raw_data, list)
+            else raw_data.get("daily_logs", [])
         )
+        if not daily_logs:
+            continue
+
+        df = pd.DataFrame(daily_logs)
+        if "ai_portfolio_value" not in df.columns and "portfolio_value" in df.columns:
+            df["ai_portfolio_value"] = df["portfolio_value"]
+
+        df["date"] = pd.to_datetime(df["date"])
+        df.sort_values("date", inplace=True)
+        df.set_index("date", inplace=True)
+
+        strategy_label = (
+            os.path.basename(file_path)
+            .replace("react_results_", "")
+            .replace(".json", "")
+            .upper()
+        )
+        dfs[strategy_label] = df
+        price_panels[strategy_label] = extract_asset_prices(df)
+
+    if not dfs:
+        print("❌ Error: No valid JSON performance log files loaded.")
+        return
+
+    # Base reference timeframe and baseline extraction
+    primary_label = list(dfs.keys())[0]
+    ref_df = dfs[primary_label]
+    initial_val = ref_df["ai_portfolio_value"].iloc[0]
+
+    prices_df = price_panels[primary_label]
+    if not prices_df.empty:
+        norm_prices = prices_df.div(prices_df.iloc[0], axis=1)
+        benchmark_series = norm_prices.mean(axis=1) * initial_val
     else:
-        print(f"❌ Error: Unexpected JSON data type in '{input_json}'.")
-        return
+        benchmark_series = pd.Series(initial_val, index=ref_df.index)
 
-    if not daily_logs:
-        print(f"❌ Error: No daily log rows found in '{input_json}'.")
-        return
-
-    df = pd.DataFrame(daily_logs)
-
-    # Verify required columns exist
-    required_columns = ['date', 'ai_portfolio_value']
-    missing = [c for c in required_columns if c not in df.columns]
-    if missing:
-        print(f"❌ Error: Missing required columns in daily logs: {missing}")
-        return
-
-    df['date'] = pd.to_datetime(df['date'])
-    df.sort_values('date', inplace=True)
-    df.set_index('date', inplace=True)
-
-    # Generate or extract baseline value if missing
-    if 'baseline_value' not in df.columns:
-        if 'price' in df.columns:
-            df['baseline_value'] = (df['price'] / df['price'].iloc[0]) * df['ai_portfolio_value'].iloc[0]
-        else:
-            df['baseline_value'] = df['ai_portfolio_value'].iloc[0]
-
-    # Calculate short-term rolling returns and outperformance delta
-    df['ai_rolling_ret'] = df['ai_portfolio_value'].pct_change(rolling_window) * 100.0
-    df['base_rolling_ret'] = df['baseline_value'].pct_change(rolling_window) * 100.0
-    df['rolling_excess'] = df['ai_rolling_ret'] - df['base_rolling_ret']
-
-    # Cumulative performance metrics
-    initial_ai = df['ai_portfolio_value'].iloc[0]
-    final_ai = df['ai_portfolio_value'].iloc[-1]
-    ai_return = metrics.get('ai_return_pct', ((final_ai - initial_ai) / initial_ai) * 100.0)
-
-    initial_base = df['baseline_value'].iloc[0]
-    final_base = df['baseline_value'].iloc[-1]
-    baseline_return = metrics.get('baseline_return_pct', ((final_base - initial_base) / initial_base) * 100.0)
-
-    # Styling setup
-    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-    
-    has_price = 'price' in df.columns and 'trade_executed' in df.columns
-    fig_rows = 3 if has_price else 2
-    height_ratios = [2.2, 1.1, 1.1] if has_price else [2.5, 1.2]
-    
-    fig, axes = plt.subplots(
-        fig_rows, 1, 
-        figsize=(14, 10 if has_price else 8), 
-        sharex=True, 
-        gridspec_kw={'height_ratios': height_ratios}
+    # Plot Configuration
+    plt.style.use(
+        "seaborn-v0_8-whitegrid"
+        if "seaborn-v0_8-whitegrid" in plt.style.available
+        else "default"
     )
-    
-    if fig_rows == 2:
-        ax1, ax2 = axes
-        ax3 = None
-    else:
-        ax1, ax2, ax3 = axes
+    fig, (ax1, ax2, ax3) = plt.subplots(
+        3,
+        1,
+        figsize=(14, 11),
+        sharex=True,
+        gridspec_kw={"height_ratios": [2.3, 1.1, 1.2]},
+    )
 
-    ticker = input_json.replace("react_results_high_growth_", "").replace("react_results_harness_", "").replace("react_results_plain_", "").replace("react_results_", "").replace(".json", "")
+    # PANEL 1: EQUITY CURVES & BACKGROUND ASSET TRAJECTORIES
+    if not prices_df.empty:
+        scaled_stock_prices = norm_prices * initial_val
+        for col in scaled_stock_prices.columns:
+            ax1.plot(
+                scaled_stock_prices.index,
+                scaled_stock_prices[col],
+                color="gray",
+                alpha=0.18,
+                linewidth=0.9,
+                linestyle="-.",
+            )
+        ax1.plot([], [], color="gray", alpha=0.4, linestyle="-.", label="Underlying Stock Trajectories")
 
-    # ----------------------------------------------------
-    # PANEL 1: EQUITY CURVES & OUTPERFORMANCE REGIMES
-    # ----------------------------------------------------
+    bench_ret = (
+        (benchmark_series.iloc[-1] - benchmark_series.iloc[0])
+        / benchmark_series.iloc[0]
+    ) * 100.0
     ax1.plot(
-        df.index, 
-        df['baseline_value'], 
-        label=f'Buy & Hold Benchmark [{baseline_return:+.2f}%]', 
-        color='#7f8c8d', 
-        linestyle='--', 
-        linewidth=1.8, 
-        alpha=0.85
+        benchmark_series.index,
+        benchmark_series,
+        label=f"Equal-Weight Buy & Hold Benchmark [{bench_ret:+.2f}%]",
+        color="#7f8c8d",
+        linestyle="--",
+        linewidth=2.0,
     )
 
-    ax1.plot(
-        df.index, 
-        df['ai_portfolio_value'], 
-        label=f'AI Agent / Harness [{ai_return:+.2f}%]', 
-        color='#1f77b4', 
-        linewidth=2.2
-    )
+    colors = ["#1f77b4", "#2ecc71", "#9b59b6", "#e67e22", "#e74c3c"]
+    stats_records = []
 
-    # Highlight short-term outperformance regimes in light green
-    outperforming = df['rolling_excess'] > 0
-    ax1.fill_between(
-        df.index, 
-        df['ai_portfolio_value'].min(), 
-        df['ai_portfolio_value'].max(), 
-        where=outperforming, 
-        color='#2ecc71', 
-        alpha=0.12, 
-        label=f'Short-Term Outperformance ({rolling_window}d)'
-    )
-
-    ax1.set_title(f"Scientific Performance Analysis: AI Agent vs. Buy & Hold ({ticker.upper()})", fontsize=14, fontweight='bold', pad=12)
-    ax1.set_ylabel("Portfolio Value ($)", fontsize=10, fontweight='bold')
-    ax1.yaxis.set_major_formatter('${x:,.0f}')
-    ax1.legend(loc='upper left', frameon=True, framealpha=0.9, fontsize=10)
-    ax1.grid(True, linestyle=':', alpha=0.6)
-
-    # ----------------------------------------------------
-    # PANEL 2: ROLLING SHORT-TERM OUTPERFORMANCE SPREAD
-    # ----------------------------------------------------
-    ax2.plot(df.index, df['rolling_excess'], color='#2c3e50', linewidth=1.0, alpha=0.7)
-    ax2.axhline(0, color='gray', linestyle='--', linewidth=1)
-    
-    ax2.fill_between(
-        df.index, 0, df['rolling_excess'], 
-        where=(df['rolling_excess'] >= 0), color='#2ecc71', alpha=0.45, label='AI Outperforming'
-    )
-    ax2.fill_between(
-        df.index, 0, df['rolling_excess'], 
-        where=(df['rolling_excess'] < 0), color='#e74c3c', alpha=0.45, label='Buy & Hold Outperforming'
-    )
-
-    ax2.set_ylabel(f"Rolling {rolling_window}d Delta (%)", fontsize=10, fontweight='bold')
-    ax2.set_title(f"Short-Term Excess Return Spread ({rolling_window}-Trading Day Window)", fontsize=11, fontweight='bold')
-    ax2.legend(loc='upper left', frameon=True, framealpha=0.9, fontsize=9)
-    ax2.grid(True, linestyle=':', alpha=0.6)
-
-    # ----------------------------------------------------
-    # PANEL 3: STOCK PRICE & TRADE EXECUTIONS (IF APPLICABLE)
-    # ----------------------------------------------------
-    if ax3 is not None:
-        ax3.plot(
-            df.index, 
-            df['price'], 
-            label='Stock Price', 
-            color='#3498db', 
-            linewidth=1.5
+    for i, (label, df) in enumerate(dfs.items()):
+        series = df["ai_portfolio_value"]
+        ret = ((series.iloc[-1] - series.iloc[0]) / series.iloc[0]) * 100.0
+        color = colors[i % len(colors)]
+        
+        ax1.plot(
+            df.index,
+            series,
+            label=f"Agent ({label}) [{ret:+.2f}%]",
+            color=color,
+            linewidth=2.2,
         )
 
-        buys = df[df['trade_executed'].astype(str).str.startswith('BOUGHT', na=False)]
-        sells = df[df['trade_executed'].astype(str).str.startswith('SOLD', na=False)]
+        # Quantitative Performance Metrics
+        daily_rets = series.pct_change().dropna()
+        stats_records.append(
+            {
+                "Strategy": f"Agent ({label})",
+                "Total Return (%)": f"{ret:+.2f}%",
+                "CAGR (%)": f"{compute_cagr(series)*100:+.2f}%",
+                "Sharpe Ratio": f"{compute_sharpe(daily_rets):.2f}",
+                "Sortino Ratio": f"{compute_sortino(daily_rets):.2f}",
+                "Max Drawdown (%)": f"{compute_drawdown(series).min():.2f}%",
+                "Calmar Ratio": f"{compute_calmar(series):.2f}",
+            }
+        )
 
-        if not buys.empty:
-            ax3.scatter(
-                buys.index, buys['price'], 
-                marker='^', color='#27ae60', s=100, label='BUY Action', zorder=5
+    # Benchmark Quantitative Metrics
+    bench_daily = benchmark_series.pct_change().dropna()
+    stats_records.append(
+        {
+            "Strategy": "Equal-Weight Benchmark",
+            "Total Return (%)": f"{bench_ret:+.2f}%",
+            "CAGR (%)": f"{compute_cagr(benchmark_series)*100:+.2f}%",
+            "Sharpe Ratio": f"{compute_sharpe(bench_daily):.2f}",
+            "Sortino Ratio": f"{compute_sortino(bench_daily):.2f}",
+            "Max Drawdown (%)": f"{compute_drawdown(benchmark_series).min():.2f}%",
+            "Calmar Ratio": f"{compute_calmar(benchmark_series):.2f}",
+        }
+    )
+
+    ax1.set_title(
+        "Multi-Strategy Comparative Analysis with Background Market Trajectories",
+        fontsize=14,
+        fontweight="bold",
+        pad=12,
+    )
+    ax1.set_ylabel("Portfolio Value ($)", fontsize=10, fontweight="bold")
+    ax1.yaxis.set_major_formatter("${x:,.0f}")
+    ax1.legend(loc="upper left", frameon=True, framealpha=0.9, fontsize=9)
+    ax1.grid(True, linestyle=":", alpha=0.6)
+
+    # PANEL 2: ROLLING EXCESS RETURN VS BENCHMARK
+    prim_df = list(dfs.values())[0]
+    rolling_window = 21
+    prim_rolling = prim_df["ai_portfolio_value"].pct_change(rolling_window) * 100.0
+    bench_rolling = benchmark_series.pct_change(rolling_window) * 100.0
+    excess_spread = prim_rolling - bench_rolling
+
+    ax2.plot(excess_spread.index, excess_spread, color="#2c3e50", linewidth=1.0, alpha=0.8)
+    ax2.axhline(0, color="gray", linestyle="--", linewidth=1)
+    ax2.fill_between(
+        excess_spread.index,
+        0,
+        excess_spread,
+        where=(excess_spread >= 0),
+        color="#2ecc71",
+        alpha=0.4,
+        label="Outperforming",
+    )
+    ax2.fill_between(
+        excess_spread.index,
+        0,
+        excess_spread,
+        where=(excess_spread < 0),
+        color="#e74c3c",
+        alpha=0.4,
+        label="Underperforming",
+    )
+    ax2.set_ylabel(f"Rolling {rolling_window}d Spread (%)", fontsize=10, fontweight="bold")
+    ax2.set_title(f"Rolling Excess Return vs. Benchmark ({primary_label})", fontsize=11, fontweight="bold")
+    ax2.legend(loc="upper left", frameon=True, framealpha=0.9, fontsize=9)
+    ax2.grid(True, linestyle=":", alpha=0.6)
+
+    # PANEL 3: NORMALIZED ASSET PRICE MOVEMENTS
+    if not prices_df.empty:
+        for col in prices_df.columns:
+            ax3.plot(
+                norm_prices.index,
+                norm_prices[col],
+                label=col,
+                linewidth=1.2,
+                alpha=0.75,
             )
+        ax3.set_ylabel("Normalized Growth", fontsize=10, fontweight="bold")
+        ax3.set_title("Underlying Stock Performance Normalized (Base=1.0)", fontsize=11, fontweight="bold")
+        ax3.legend(loc="upper left", ncol=5, frameon=True, framealpha=0.9, fontsize=8)
+        ax3.grid(True, linestyle=":", alpha=0.6)
 
-        if not sells.empty:
-            ax3.scatter(
-                sells.index, sells['price'], 
-                marker='v', color='#c0392b', s=100, label='SELL Action', zorder=5
-            )
-
-        ax3.set_ylabel("Stock Price ($)", fontsize=10, fontweight='bold')
-        ax3.yaxis.set_major_formatter('${x:,.2f}')
-        ax3.legend(loc='upper left', frameon=True, framealpha=0.9, fontsize=9)
-        ax3.grid(True, linestyle=':', alpha=0.6)
-
-    # Date formatting on bottom X-axis
-    bottom_ax = ax3 if ax3 is not None else ax2
-    bottom_ax.xaxis.set_major_locator(mdates.AutoDateLocator())
-    bottom_ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    ax3.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax3.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
     fig.autofmt_xdate()
 
     plt.tight_layout()
-    plt.savefig(output_png, dpi=300, bbox_inches='tight')
+    plt.savefig(output_png, dpi=300, bbox_inches="tight")
     print(f"📊 Performance plot saved to: {output_png}")
 
-    # ----------------------------------------------------
-    # STATISTICAL OUTPERFORMANCE TABLE
-    # ----------------------------------------------------
-    daily_ai_ret = df['ai_portfolio_value'].pct_change().dropna()
-    daily_base_ret = df['baseline_value'].pct_change().dropna()
-    
-    sharpe_ai = compute_sharpe(daily_ai_ret)
-    sharpe_base = compute_sharpe(daily_base_ret)
-    
-    max_dd_ai = compute_drawdown(df['ai_portfolio_value']).min()
-    max_dd_base = compute_drawdown(df['baseline_value']).min()
-    
-    win_rate = (df['rolling_excess'] > 0).mean() * 100.0
+    # Display Comparative Summary Table
+    summary_df = pd.DataFrame(stats_records).set_index("Strategy")
+    print("\n" + "=" * 85)
+    print("                 MULTI-STRATEGY STATISTICAL PERFORMANCE SUMMARY")
+    print("=" * 85)
+    print(summary_df.to_string())
+    print("=" * 85 + "\n")
 
-    stats_df = pd.DataFrame({
-        "Metric": ["Total Return (%)", "Sharpe Ratio", "Max Drawdown (%)"],
-        "AI Agent / Harness": [f"{ai_return:+.2f}%", f"{sharpe_ai:.2f}", f"{max_dd_ai:.2f}%"],
-        "Buy & Hold": [f"{baseline_return:+.2f}%", f"{sharpe_base:.2f}", f"{max_dd_base:.2f}%"]
-    }).set_index("Metric")
-
-    print("\n" + "=" * 55)
-    print(f"   STATISTICAL EVALUATION SUMMARY ({ticker.upper()})")
-    print("=" * 55)
-    print(stats_df.to_string())
-    print("-" * 55)
-    print(f"Short-Term ({rolling_window}-Day) Win Rate vs Benchmark: {win_rate:.1f}% of trading days")
-    print("=" * 55 + "\n")
 
 if __name__ == "__main__":
-    targets = [
-        ("react_results_INTC.json", "ReAct_performance_v2_INTC.png"),
-    ]
-    
-    for json_file, png_file in targets:
-        plot_scientific_performance(json_file, png_file)
+    if len(sys.argv) > 1:
+        json_inputs = [f for f in sys.argv[1:] if f.endswith(".json")]
+        out_png = "comparative_performance.png"
+        plot_comparative_performance(json_inputs, out_png)
+    else:
+        default_files = [
+            "react_results_portfolio.json",
+            "react_backtest_results_vanilla.json",
+            "react_results_qwen_harness.json",
+        ]
+        plot_comparative_performance(default_files, "portfolio_comparison.png")

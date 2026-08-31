@@ -1,203 +1,276 @@
-import os
+import argparse
 import json
+import os
 import numpy as np
 import pandas as pd
-import yfinance as yf
-import matplotlib
-# Non-interactive backend for HPC / Slurm node environments
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
+from scipy.optimize import minimize
 
-UNIVERSE = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ"]
-ROLLING_WINDOW = 21  # 21 trading days (~1 month)
-RISK_FREE_RATE = 0.04
+def calculate_portfolio_metrics(portfolio_series: pd.Series, benchmark_series: pd.Series, risk_free_rate: float = 0.0) -> dict:
+    df = pd.DataFrame({"portfolio": portfolio_series, "benchmark": benchmark_series}).dropna()
+    p_returns = df["portfolio"].pct_change().dropna()
+    b_returns = df["benchmark"].pct_change().dropna()
 
-def compute_drawdown(series: pd.Series) -> pd.Series:
-    peak = series.cummax()
-    return (series - peak) / peak * 100.0
+    total_days = (df.index[-1] - df.index[0]).days
+    years = max(total_days / 365.25, 0.01)
 
-def compute_sharpe(daily_returns: pd.Series) -> float:
-    rf_daily = RISK_FREE_RATE / 252
-    excess = daily_returns - rf_daily
-    if excess.std() == 0 or np.isnan(excess.std()):
-        return 0.0
-    return np.sqrt(252) * (excess.mean() / excess.std())
+    total_return = (df["portfolio"].iloc[-1] / df["portfolio"].iloc[0]) - 1.0
+    cagr = ((df["portfolio"].iloc[-1] / df["portfolio"].iloc[0]) ** (1.0 / years)) - 1.0
 
-def plot_multi_asset_portfolio(input_json: str, output_png: str):
-    if not os.path.exists(input_json):
-        print(f"❌ Error: Could not find '{input_json}'.")
-        return
+    ann_vol = p_returns.std() * np.sqrt(252)
+    downside_returns = p_returns[p_returns < 0]
+    downside_vol = np.sqrt(np.mean(downside_returns**2)) * np.sqrt(252) if len(downside_returns) > 0 else 1e-6
 
-    with open(input_json, 'r') as f:
-        raw_data = json.load(f)
+    rolling_peak = df["portfolio"].cummax()
+    drawdown_series = (df["portfolio"] - rolling_peak) / rolling_peak
+    max_drawdown = abs(float(drawdown_series.min()))
 
-    daily_logs = raw_data if isinstance(raw_data, list) else raw_data.get("daily_logs", raw_data.get("results", []))
-    if not daily_logs:
-        print(f"❌ Error: No valid daily entries in '{input_json}'.")
-        return
+    excess_cagr = cagr - risk_free_rate
+    sharpe = (p_returns.mean() * 252 - risk_free_rate) / ann_vol if ann_vol > 0 else 0.0
+    sortino = excess_cagr / downside_vol if downside_vol > 0 else 0.0
+    calmar = excess_cagr / max_drawdown if max_drawdown > 0 else 0.0
 
-    df = pd.DataFrame(daily_logs)
-    df['date'] = pd.to_datetime(df['date'])
-    df.sort_values('date', inplace=True)
-    df.set_index('date', inplace=True)
+    if df["portfolio"].equals(df["benchmark"]):
+        beta = 1.0
+        alpha_ann = 0.0
+    else:
+        beta, alpha_daily = np.polyfit(b_returns, p_returns, 1)
+        alpha_ann = alpha_daily * 252 * 100.0
 
-    start_date = df.index[0].strftime("%Y-%m-%d")
-    end_date = df.index[-1].strftime("%Y-%m-%d")
-    initial_cap = float(df['portfolio_value'].iloc[0])
+    return {
+        "Total Return (%)": round(total_return * 100.0, 2),
+        "CAGR (%)": round(cagr * 100.0, 2),
+        "Ann. Volatility (%)": round(ann_vol * 100.0, 2),
+        "Max Drawdown (%)": round(max_drawdown * 100.0, 2),
+        "Sharpe Ratio": round(sharpe, 2),
+        "Sortino Ratio": round(sortino, 2),
+        "Calmar Ratio": round(calmar, 2),
+        "Beta (Systematic Risk)": round(beta, 2),
+        "Alpha (% p.a.)": round(alpha_ann, 2),
+        "drawdown_series": drawdown_series
+    }
 
-    # Fetch asset price data for benchmark & background stock paths
-    print(f"Downloading underlying universe stock prices ({start_date} to {end_date})...")
-    stock_data = yf.download(UNIVERSE, start=start_date, end=end_date, auto_adjust=True)["Close"]
-    stock_data = stock_data.reindex(df.index).ffill().bfill()
+def load_json_series(file_path: str):
+    if not file_path or not os.path.exists(file_path):
+        return None, None
+    with open(file_path, "r") as f:
+        data = json.load(f)
+    df = pd.DataFrame(data)
+    df["date"] = pd.to_datetime(df["date"])
+    df.set_index("date", inplace=True)
+    return df["portfolio_value"], data
 
-    # Equal-weight buy & hold benchmark
-    norm_stocks = stock_data / stock_data.iloc[0]
-    df['baseline_value'] = norm_stocks.mean(axis=1) * initial_cap
+# --- QUANTITATIVE BASELINE WEIGHT SOLVERS ---
 
-    # Individual stock paths scaled to starting portfolio capital
-    scaled_stocks = norm_stocks * initial_cap
+def get_risk_parity_weights(returns_window: pd.DataFrame) -> np.ndarray:
+    vols = returns_window.std().values
+    inv_vols = np.where(vols > 1e-8, 1.0 / vols, 0.0)
+    s = np.sum(inv_vols)
+    return inv_vols / s if s > 0 else np.ones(len(vols)) / len(vols)
 
-    # Calculate short-term rolling returns & excess return delta
-    df['ai_rolling'] = df['portfolio_value'].pct_change(ROLLING_WINDOW) * 100.0
-    df['base_rolling'] = df['baseline_value'].pct_change(ROLLING_WINDOW) * 100.0
-    df['rolling_excess'] = df['ai_rolling'] - df['base_rolling']
+def get_min_var_weights(returns_window: pd.DataFrame) -> np.ndarray:
+    n = returns_window.shape[1]
+    if len(returns_window) < 5:
+        return np.ones(n) / n
 
-    # Returns & Drawdowns
-    ai_return = ((df['portfolio_value'].iloc[-1] - initial_cap) / initial_cap) * 100.0
-    base_return = ((df['baseline_value'].iloc[-1] - initial_cap) / initial_cap) * 100.0
-    dd_ai = compute_drawdown(df['portfolio_value'])
-    dd_base = compute_drawdown(df['baseline_value'])
+    cov = returns_window.cov().values + np.eye(n) * 1e-6
+    init_w = np.ones(n) / n
+    bounds = tuple((0.0, 1.0) for _ in range(n))
+    constraints = ({'type': 'eq', 'fun': lambda w: np.sum(w) - 1.0})
 
-    # Parse Executed Asset Allocations (%) over time
-    alloc_data = []
-    for d, row in df.iterrows():
-        allocs = row.get("executed_allocations", row.get("allocations", {}))
-        alloc_data.append(allocs if isinstance(allocs, dict) else {})
-    alloc_df = pd.DataFrame(alloc_data, index=df.index).fillna(0.0)
-
-    # Styling setup
-    plt.style.use('seaborn-v0_8-whitegrid' if 'seaborn-v0_8-whitegrid' in plt.style.available else 'default')
-    fig, (ax1, ax2, ax3) = plt.subplots(
-        3, 1, 
-        figsize=(14, 11), 
-        sharex=True, 
-        gridspec_kw={'height_ratios': [2.2, 1.0, 1.2]}
+    res = minimize(
+        fun=lambda w: w.T @ cov @ w,
+        x0=init_w,
+        method='SLSQP',
+        bounds=bounds,
+        constraints=constraints,
+        options={'ftol': 1e-9, 'maxiter': 500}
     )
 
-    # ----------------------------------------------------
-    # PANEL 1: EQUITY CURVE + FADED STOCK PRICE PATHS
-    # ----------------------------------------------------
-    # Plot faint individual asset trajectories
-    first_stock = True
-    for col in scaled_stocks.columns:
-        ax1.plot(
-            scaled_stocks.index, 
-            scaled_stocks[col], 
-            color='#95a5a6', 
-            alpha=0.25, 
-            linewidth=1.0, 
-            linestyle='-', 
-            label='Individual Stocks' if first_stock else ""
-        )
-        first_stock = False
+    w = res.x if (res.success and res.x is not None) else init_w
+    w = np.clip(w, 0, 1)
+    total = np.sum(w)
+    return w / total if total > 0 else np.ones(n) / n
 
-    # Plot Buy & Hold Equal-Weight Benchmark
-    ax1.plot(
-        df.index, df['baseline_value'], 
-        label=f'Equal-Weight Benchmark [{base_return:+.2f}%]', 
-        color='#2c3e50', linestyle='--', linewidth=2.0, alpha=0.9
+def get_cov_risk_parity_weights(returns_window: pd.DataFrame) -> np.ndarray:
+    n = returns_window.shape[1]
+    if len(returns_window) < 5:
+        return np.ones(n) / n
+
+    cov = returns_window.cov().values + np.eye(n) * 1e-6
+    init_y = np.ones(n)
+
+    def spinu_erc_objective(y):
+        return 0.5 * (y.T @ cov @ y) - (1.0 / n) * np.sum(np.log(np.maximum(y, 1e-8)))
+
+    bounds = tuple((1e-4, None) for _ in range(n))
+    res = minimize(
+        fun=spinu_erc_objective,
+        x0=init_y,
+        method='L-BFGS-B',
+        bounds=bounds
     )
 
-    # Plot ReAct Portfolio Value
-    ax1.plot(
-        df.index, df['portfolio_value'], 
-        label=f'Multi-Asset AI Agent [{ai_return:+.2f}%]', 
-        color='#e74c3c', linewidth=2.5
-    )
+    if res.x is not None:
+        w = res.x / np.sum(res.x)
+        return w
+    return np.ones(n) / n
 
-    # Outperformance Regime Overlay
-    harness_winning = df['rolling_excess'] > 0
-    ax1.fill_between(
-        df.index, df['portfolio_value'].min(), df['portfolio_value'].max(), 
-        where=harness_winning, color='#2ecc71', alpha=0.10, label=f'Short-Term Outperformance ({ROLLING_WINDOW}d)'
-    )
+def build_baseline_portfolios(price_df: pd.DataFrame, initial_capital: float, rebalance_freq: int = 5, lookback: int = 126) -> dict:
+    daily_returns = price_df.pct_change().fillna(0.0)
+    assets = price_df.columns
+    n_assets = len(assets)
 
-    ax1.set_title("Multi-Asset ReAct Portfolio vs. Benchmark & Stock Universe Movement", fontsize=14, fontweight='bold', pad=12)
-    ax1.set_ylabel("Portfolio Value ($)", fontsize=10, fontweight='bold')
-    ax1.yaxis.set_major_formatter('${x:,.0f}')
-    ax1.legend(loc='upper left', frameon=True, framealpha=0.9, fontsize=9)
-    ax1.grid(True, linestyle=':', alpha=0.6)
+    strategies = ["60/40", "RiskParity", "CovRiskParity", "MinVariance"]
+    portfolio_values = {s: [initial_capital] for s in strategies}
+    current_weights = {s: np.ones(n_assets) / n_assets for s in strategies}
 
-    # ----------------------------------------------------
-    # PANEL 2: SHORT-TERM ROLLING OUTPERFORMANCE DELTA
-    # ----------------------------------------------------
-    ax2.plot(df.index, df['rolling_excess'], color='#34495e', linewidth=1.0, alpha=0.8)
-    ax2.axhline(0, color='gray', linestyle='--', linewidth=1)
-    ax2.fill_between(df.index, 0, df['rolling_excess'], where=(df['rolling_excess'] >= 0), color='#2ecc71', alpha=0.45, label='AI Outperforming')
-    ax2.fill_between(df.index, 0, df['rolling_excess'], where=(df['rolling_excess'] < 0), color='#e74c3c', alpha=0.45, label='Benchmark Outperforming')
+    has_bond = "TLT" in assets
+    bond_idx = list(assets).index("TLT") if has_bond else -1
 
-    ax2.set_ylabel(f"{ROLLING_WINDOW}d Excess Return (%)", fontsize=10, fontweight='bold')
-    ax2.set_title(f"Rolling Short-Term Excess Return Spread ({ROLLING_WINDOW}-Day Window)", fontsize=11, fontweight='bold')
-    ax2.legend(loc='lower left', frameon=True, framealpha=0.9, fontsize=9)
-    ax2.grid(True, linestyle=':', alpha=0.6)
+    for t in range(1, len(price_df)):
+        if t % rebalance_freq == 0 or t == 1:
+            window = daily_returns.iloc[max(0, t - lookback):t]
+            
+            if len(window) >= 5:
+                current_weights["RiskParity"] = get_risk_parity_weights(window)
+                current_weights["MinVariance"] = get_min_var_weights(window)
+                current_weights["CovRiskParity"] = get_cov_risk_parity_weights(window)
+            
+            w_6040 = np.zeros(n_assets)
+            if has_bond:
+                w_6040[bond_idx] = 0.40
+                eq_indices = [i for i in range(n_assets) if i != bond_idx]
+                w_6040[eq_indices] = 0.60 / len(eq_indices)
+            else:
+                w_6040 = (0.60 / n_assets) * np.ones(n_assets)
+            current_weights["60/40"] = w_6040
 
-    # ----------------------------------------------------
-    # PANEL 3: DYNAMIC ASSET ALLOCATION BREAKDOWN
-    # ----------------------------------------------------
-    if not alloc_df.empty:
-        cols_to_plot = [c for c in alloc_df.columns if c in UNIVERSE or c == "CASH"]
-        cmap = plt.get_cmap("tab20")
-        colors = [cmap(i) for i in np.linspace(0, 1, len(cols_to_plot))]
-        
-        ax3.stackplot(
-            alloc_df.index, 
-            [alloc_df[c] for c in cols_to_plot], 
-            labels=cols_to_plot, 
-            colors=colors, 
-            alpha=0.85
-        )
-        ax3.set_ylabel("Allocation (%)", fontsize=10, fontweight='bold')
-        ax3.set_ylim(0, 100)
-        ax3.set_title("Dynamic Portfolio Exposure Shifting over Time", fontsize=11, fontweight='bold')
-        ax3.legend(loc='center left', bbox_to_anchor=(1.01, 0.5), frameon=True, fontsize=8)
-        ax3.grid(True, linestyle=':', alpha=0.6)
+        r_t = daily_returns.iloc[t].values
+        for strat in strategies:
+            strat_ret = np.dot(current_weights[strat], r_t)
+            prev_val = portfolio_values[strat][-1]
+            portfolio_values[strat].append(prev_val * (1.0 + strat_ret))
 
-    # Formatting X-axis dates
-    ax3.xaxis.set_major_locator(mdates.AutoDateLocator())
-    ax3.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
-    fig.autofmt_xdate()
+    return {strat: pd.Series(vals, index=price_df.index) for strat, vals in portfolio_values.items()}
+
+def generate_evaluation_report(
+    harness_file: str = "react_harness_results1.json",
+    gpt_harness_file: str = None,
+    no_harness_file: str = "react_no_harness_results1.json",
+    raw_llm_file: str = "qwen_raw_results1.json",
+    output_plot: str = "MultiAsset_Baseline_Performance1.png"
+):
+    harness_series, harness_raw = load_json_series(harness_file)
+    gpt_harness_series, _ = load_json_series(gpt_harness_file)
+    react_no_harness_series, _ = load_json_series(no_harness_file)
+    raw_llm_series, _ = load_json_series(raw_llm_file)
+
+    if harness_series is None:
+        raise FileNotFoundError(f"Primary file '{harness_file}' not found.")
+
+    traded_assets = list(harness_raw[0]["prices"].keys())
+    price_dict = {t: [r["prices"][t] for r in harness_raw] for t in traded_assets}
+    df_index = pd.to_datetime([r["date"] for r in harness_raw])
+    price_df = pd.DataFrame(price_dict, index=df_index)
+    
+    initial_val = float(harness_series.iloc[0])
+    eq_returns = price_df.pct_change().mean(axis=1)
+    eq_portfolio = (1 + eq_returns.fillna(0)).cumprod() * initial_val
+
+    # Generate Baseline Strategies
+    baselines = build_baseline_portfolios(price_df, initial_capital=initial_val)
+
+    # Master Systems Dict
+    systems = {
+        "ReAct + Risk Harness": harness_series,
+        "ReAct + GPT Harness": gpt_harness_series,
+        "Vanilla ReAct": react_no_harness_series,
+        "Raw Direct LLM": raw_llm_series,
+        "Equal-Weight (1/n)": eq_portfolio,
+        "60/40 Allocation": baselines["60/40"],
+        "Risk Parity": baselines["RiskParity"],
+        "Covariance Risk Parity": baselines["CovRiskParity"],
+        "Minimum Variance": baselines["MinVariance"],
+    }
+
+    metrics = {name: calculate_portfolio_metrics(series, eq_portfolio) for name, series in systems.items() if series is not None}
+
+    print("\n" + "="*140)
+    print("                                         COMPLETE SYSTEM & QUANT BASELINE SUMMARY")
+    print("="*140)
+    
+    headers = list(metrics.keys())
+    header_row = f"{'Metric':<24} | " + " | ".join([f"{h[:10]:<10}" for h in headers])
+    print(header_row)
+    print("-" * len(header_row))
+
+    metric_keys = [
+        "Total Return (%)", "CAGR (%)", "Ann. Volatility (%)", "Max Drawdown (%)", 
+        "Sharpe Ratio", "Sortino Ratio", "Calmar Ratio", "Beta (Systematic Risk)", "Alpha (% p.a.)"
+    ]
+    for k in metric_keys:
+        row = f"{k:<24} | " + " | ".join([f"{metrics[h][k]:<10}" for h in headers])
+        print(row)
+    print("="*140 + "\n")
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(14, 9), sharex=True, gridspec_kw={'height_ratios': [2.5, 1]})
+
+    styles = {
+        "ReAct + Risk Harness": {"color": "#1f77b4", "linestyle": "-", "linewidth": 2.2},
+        "ReAct + GPT Harness": {"color": "#9467bd", "linestyle": "-", "linewidth": 2.2},
+        "Vanilla ReAct": {"color": "#2ca02c", "linestyle": "--", "linewidth": 1.5},
+        "Raw Direct LLM": {"color": "#d62728", "linestyle": "-.", "linewidth": 1.5},
+        "Equal-Weight (1/n)": {"color": "#ff7f0e", "linestyle": ":", "linewidth": 1.5},
+        "60/40 Allocation": {"color": "#8c564b", "linestyle": "--", "linewidth": 1.2},
+        "Risk Parity": {"color": "#17becf", "linestyle": "-", "linewidth": 1.2},
+        "Covariance Risk Parity": {"color": "#e377c2", "linestyle": "-", "linewidth": 1.2},
+        "Minimum Variance": {"color": "#7f7f7f", "linestyle": "-.", "linewidth": 1.2},
+    }
+
+    for name, series in systems.items():
+        if series is not None:
+            st = styles[name]
+            alpha_val = metrics[name]["Alpha (% p.a.)"]
+            beta_val = metrics[name]["Beta (Systematic Risk)"]
+            ax1.plot(series.index, series, label=f"{name} (α: {alpha_val}%, β: {beta_val})", **st)
+
+    ax1.set_title("AI Agent vs. Quantitative Benchmark Baselines", fontsize=14, fontweight="bold")
+    ax1.set_ylabel("Portfolio Value ($)", fontsize=11)
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(loc="upper left", frameon=True, fontsize=8)
+
+    for name, series in systems.items():
+        if series is not None:
+            st = styles[name]
+            dd_series = metrics[name]["drawdown_series"] * 100
+            ax2.plot(series.index, dd_series, label=name, **st)
+            if "Harness" in name:
+                ax2.fill_between(series.index, dd_series, 0, color=st["color"], alpha=0.08)
+
+    ax2.set_title("Underwater Chart (Drawdown %)", fontsize=11, fontweight="bold")
+    ax2.set_xlabel("Date", fontsize=11)
+    ax2.set_ylabel("Drawdown (%)", fontsize=11)
+    ax2.grid(True, linestyle="--", alpha=0.5)
 
     plt.tight_layout()
-    plt.savefig(output_png, dpi=300, bbox_inches='tight')
-    print(f"📊 Portfolio performance plot saved to: {output_png}\n")
-
-    # ----------------------------------------------------
-    # STATISTICAL OUTPERFORMANCE SUMMARY
-    # ----------------------------------------------------
-    daily_ai = df['portfolio_value'].pct_change().dropna()
-    daily_base = df['baseline_value'].pct_change().dropna()
-
-    win_rate = (df['rolling_excess'] > 0).mean() * 100.0
-
-    summary_df = pd.DataFrame({
-        "Metric": ["Total Return (%)", "Sharpe Ratio", "Max Drawdown (%)"],
-        "AI Multi-Asset Agent": [f"{ai_return:+.2f}%", f"{compute_sharpe(daily_ai):.2f}", f"{dd_ai.min():.2f}%"],
-        "Buy & Hold Equal Weight": [f"{base_return:+.2f}%", f"{compute_sharpe(daily_base):.2f}", f"{dd_base.min():.2f}%"]
-    }).set_index("Metric")
-
-    print("=" * 60)
-    print("        MULTI-ASSET PORTFOLIO STATISTICAL SUMMARY        ")
-    print("=" * 60)
-    print(summary_df.to_string())
-    print("-" * 60)
-    print(f"Short-Term ({ROLLING_WINDOW}-Day) Win Rate vs Benchmark: {win_rate:.1f}% of trading days")
-    print("=" * 60 + "\n")
+    plt.savefig(output_plot, dpi=300)
+    print(f"Graph saved to {output_plot}")
 
 if __name__ == "__main__":
-    targets = [
-        ("react_results_plain_portfolio.json", "MultiAsset_Plain_Performance.png"),
-        ("react_results_harness_portfolio.json", "MultiAsset_Harness_Performance.png")
-    ]
-    for json_file, png_file in targets:
-        plot_multi_asset_portfolio(json_file, png_file)
+    parser = argparse.ArgumentParser(description="Evaluate AI Agent vs Quantitative Portfolio Baselines")
+    parser.add_argument("--harness-file", type=str, default="react_harness_results1.json", help="Path to ReAct + Harness JSON results")
+    parser.add_argument("--gpt-harness-file", type=str, default="react_harness_results_gpt1.json", help="Path to GPT Harness JSON results")
+    parser.add_argument("--no-harness-file", type=str, default="react_no_harness_results1.json", help="Path to Vanilla ReAct JSON results")
+    parser.add_argument("--raw-llm-file", type=str, default="qwen_raw_results1.json", help="Path to Raw LLM JSON results")
+    parser.add_argument("--output", "-o", type=str, default="MultiAsset_Baseline_Performance1.png", help="Filename for saved plot")
+
+    args = parser.parse_args()
+
+    generate_evaluation_report(
+        harness_file=args.harness_file,
+        gpt_harness_file=args.gpt_harness_file,
+        no_harness_file=args.no_harness_file,
+        raw_llm_file=args.raw_llm_file,
+        output_plot=args.output
+    )

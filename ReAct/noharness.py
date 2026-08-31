@@ -1,187 +1,286 @@
+import argparse
 import json
 import os
 import re
+import sys
+import numpy as np
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
 
-# Connect to the background vLLM server launched by Slurm
+os.environ["YFINANCE_CACHE_DIR"] = "/tmp/yf_cache"
+yf.set_tz_cache_location("/tmp/yf_tz_cache")
+
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
 MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct-AWQ"
 
-RAW_UNIVERSE = ["AAPL", "NVDA", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "JPM", "XOM", "JNJ"]
+DEFAULT_UNIVERSE = ["GLD", "LLY", "KRE", "TSLA", "GOOGL", "TLT", "XLU", "XLE", "XOM", "NVDA"]
 
-# Anonymization Mapping to Eliminate Parametric Hindsight Bias
-ANONYMOUS_MAP = {ticker: f"ASSET_{chr(65+i)}" for i, ticker in enumerate(RAW_UNIVERSE)}
-REVERSE_MAP = {v: k for k, v in ANONYMOUS_MAP.items()}
-ANONYMOUS_UNIVERSE = list(ANONYMOUS_MAP.values())
-
+RAW_UNIVERSE = []
+ANONYMOUS_MAP = {}
+REVERSE_MAP = {}
+ANONYMOUS_UNIVERSE = []
 GLOBAL_DATA_CACHE = {}
 
-# ==========================================
-# 1. DATA PREFETCHING
-# ==========================================
+def setup_universe(tickers: list):
+    global RAW_UNIVERSE, ANONYMOUS_MAP, REVERSE_MAP, ANONYMOUS_UNIVERSE, GLOBAL_DATA_CACHE
+    RAW_UNIVERSE = [t.upper() for t in tickers]
+    ANONYMOUS_MAP = {ticker: f"ASSET_{chr(65+i)}" for i, ticker in enumerate(RAW_UNIVERSE)}
+    REVERSE_MAP = {v: k for k, v in ANONYMOUS_MAP.items()}
+    ANONYMOUS_UNIVERSE = list(ANONYMOUS_MAP.values())
+    GLOBAL_DATA_CACHE.clear()
+
 def prefetch_data(start_date: str, end_date: str):
-    lookback_start = (pd.to_datetime(start_date) - pd.Timedelta(days=60)).strftime("%Y-%m-%d")
-    print(f"Prefetching universe data from {lookback_start} to {end_date}...")
+    lookback_start = (pd.to_datetime(start_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
     for ticker in RAW_UNIVERSE:
-        df = yf.download(ticker, start=lookback_start, end=end_date, auto_adjust=True)
+        df = yf.download(ticker, start=lookback_start, end=end_date, auto_adjust=True, progress=False)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+        df = df.ffill()
+        required_cols = [c for c in ("Open", "Close") if c in df.columns]
+        if required_cols:
+            df = df.dropna(subset=required_cols)
         GLOBAL_DATA_CACHE[ANONYMOUS_MAP[ticker]] = df
 
-# ==========================================
-# 2. UNRESTRICTED PLAIN ReAct AGENT (ANONYMIZED)
-# ==========================================
-def run_daily_agent(current_date: str, portfolio_state: dict) -> dict:
-    
-    def get_market_prices(arg: str = "") -> str:
-        """Returns raw closing prices for all anonymized assets in the universe."""
-        prices = {}
-        for asset in ANONYMOUS_UNIVERSE:
-            past_df = GLOBAL_DATA_CACHE[asset].loc[:current_date]
-            prices[asset] = round(float(past_df['Close'].iloc[-1]), 2)
-        return json.dumps(prices)
+def get_market_screener(current_date: str) -> str:
+    screener = []
+    for asset in ANONYMOUS_UNIVERSE:
+        closes = GLOBAL_DATA_CACHE[asset].loc[:current_date]["Close"]
+        cp = float(closes.iloc[-1])
+        sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else cp
+        mom120 = ((cp - float(closes.iloc[-120])) / float(closes.iloc[-120])) * 100.0 if len(closes) >= 120 else 0.0
+        screener.append(
+            f"{asset}: Price=${cp:.2f} | 200d-SMA=${sma200:.2f} | 120d-Mom={mom120:.1f}%"
+        )
+    return "\n".join(screener)
 
-    def get_price_history(ticker: str) -> str:
-        """Returns recent 10-day raw closing price history for an anonymized asset."""
-        asset = ticker.strip().upper()
-        if asset not in ANONYMOUS_UNIVERSE:
-            return f"Asset {asset} not in universe."
-        past_df = GLOBAL_DATA_CACHE[asset].loc[:current_date].tail(10)
-        history = {d.strftime("%Y-%m-%d"): round(float(p), 2) for d, p in past_df['Close'].items()}
-        return json.dumps(history)
-
+def run_react_agent(current_date: str, portfolio_state: dict) -> dict:
     def get_portfolio_status(arg: str = "") -> str:
-        alloc_str = ", ".join([f"{k}: {v:.1f}%" for k, v in portfolio_state['allocations_pct'].items()])
-        return (f"Total Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
-                f"Cash: ${portfolio_state['cash']:,.2f} ({portfolio_state['cash_pct']:.1f}%)\n"
-                f"Current Equity Allocations: {alloc_str}")
+        alloc_str = ", ".join(
+            [f"{k}: {v:.1f}%" for k, v in portfolio_state["allocations_pct"].items()]
+        )
+        return (
+            f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
+            f"Cash: {portfolio_state['cash_pct']:.1f}%\n"
+            f"Allocations: {alloc_str}"
+        )
+
+    def tool_screener(arg: str = "") -> str:
+        return get_market_screener(current_date)
 
     available_tools = {
-        "get_market_prices": get_market_prices,
-        "get_price_history": get_price_history,
-        "get_portfolio_status": get_portfolio_status
+        "get_market_screener": tool_screener,
+        "get_portfolio_status": get_portfolio_status,
     }
 
-    react_system_prompt = f"""You are an autonomous trading agent evaluating the market on {current_date}.
+    system_prompt = f"""You are an autonomous ReAct Portfolio Manager on {current_date}.
+Assets: {ANONYMOUS_UNIVERSE} + CASH
 
-Available Assets: {ANONYMOUS_UNIVERSE} + CASH
+Tools:
+- get_market_screener[]
+- get_portfolio_status[]
 
-Available Tools:
-- get_market_prices[]: Fetch latest closing prices for all universe assets.
-- get_price_history[ticker]: Fetch raw price history for the last 10 trading days of an asset (e.g. ASSET_A).
-- get_portfolio_status[]: Fetch current cash, total valuation, and exposure percentages.
-
-Goal: Analyze price action directly through reasoning and allocate portfolio capital to maximize returns.
-
-Format Requirements:
-Thought: <Analyze market prices and reason through asset selection>
-Action: <tool_name>[<optional_argument>]
-Observation: <tool output>
-... (repeat Thought/Action/Observation as needed)
-Thought: <Declare final allocation weights>
-Action: Target_Allocations[{{\"ASSET_A\": 10, \"ASSET_B\": 20, \"ASSET_C\": 15, \"ASSET_D\": 0, \"ASSET_E\": 10, \"ASSET_F\": 15, \"ASSET_G\": 0, \"ASSET_H\": 10, \"ASSET_I\": 10, \"ASSET_J\": 0, \"CASH\": 10}}]
-
-Note: Target allocations across all assets and CASH MUST sum to 100."""
+Format:
+Thought: <Reasoning step>
+Action: <tool_name>[]
+Observation: <tool response>
+...
+Thought: <Final allocation decision>
+Action: Target_Allocations[{{\"ASSET_A\": 15, \"ASSET_B\": 15, ..., \"CASH\": 10}}]"""
 
     messages = [
-        {"role": "system", "content": react_system_prompt},
-        {"role": "user", "content": f"Today is {current_date}. Evaluate price action and rebalance the portfolio."}
+        {"role": "system", "content": system_prompt},
+        {
+            "role": "user",
+            "content": f"Date: {current_date}. Analyze market conditions and set target allocations.",
+        },
     ]
 
-    trajectory_log = []
-    final_decision = {"CASH": 100.0}
+    raw_decision = {"CASH": 100.0}
 
-    for step in range(5):
+    for step in range(4):
         response = client.chat.completions.create(
             model=MODEL_NAME,
             messages=messages,
             temperature=0.0,
-            max_tokens=400,
-            stop=["Observation:"]
+            max_tokens=600,
+            stop=["Observation:"],
         )
         reply = response.choices[0].message.content.strip()
-        trajectory_log.append(reply)
         messages.append({"role": "assistant", "content": reply})
 
-        action_match = re.search(r"Action:\s*(\w+)\[(.*?)\]", reply, re.DOTALL)
+        action_match = re.search(
+            r"Action:\s*(\w+)\[(.*?)\]",
+            reply,
+            re.DOTALL,
+        )
+
         if action_match:
             action_name = action_match.group(1)
             action_arg = action_match.group(2).strip()
 
             if action_name == "Target_Allocations":
-                try:
-                    parsed = json.loads(action_arg)
-                    final_decision = {k: float(v) for k, v in parsed.items()}
-                except Exception:
-                    pass
+                parsed = re.findall(
+                    r'["\']?([A-Za-z0-9_]+)["\']?\s*:\s*([\d\.-]+)',
+                    action_arg,
+                )
+                if parsed:
+                    raw_decision = {k: float(v) for k, v in parsed}
                 break
 
             if action_name in available_tools:
-                obs_text = f"Observation: {available_tools[action_name](action_arg)}"
+                obs_text = (
+                    f"Observation: {available_tools[action_name](action_arg)}"
+                )
             else:
                 obs_text = f"Observation: Tool '{action_name}' not found."
 
-            trajectory_log.append(obs_text)
             messages.append({"role": "user", "content": obs_text})
 
-    return {"date": current_date, "allocations": final_decision, "trajectory": "\n".join(trajectory_log)}
+    total = sum(raw_decision.values())
 
-# ==========================================
-# 3. UNRESTRICTED BACKTEST ENGINE
-# ==========================================
-def run_backtest(start_date: str, end_date: str, initial_capital: float = 100000.0):
+    return {
+        k: round((v / total * 100.0), 2) if total > 0 else 0.0
+        for k, v in raw_decision.items()
+    }
+
+def run_backtest(
+    start_date: str = "2023-03-15",
+    end_date: str = "2026-04-01",
+    initial_capital: float = 100000.0,
+    tickers: list = None,
+    output_file: str = "react_no_harness_results.json"
+):
+    if tickers is None or len(tickers) == 0:
+        tickers = DEFAULT_UNIVERSE
+
+    setup_universe(tickers)
     prefetch_data(start_date, end_date)
-    trading_days = [d.strftime('%Y-%m-%d') for d in GLOBAL_DATA_CACHE[ANONYMOUS_UNIVERSE[0]].index if d.strftime('%Y-%m-%d') >= start_date]
 
-    cash = initial_capital
+    trading_days = [
+        d.strftime("%Y-%m-%d")
+        for d in GLOBAL_DATA_CACHE[ANONYMOUS_UNIVERSE[0]].index
+        if d.strftime("%Y-%m-%d") >= start_date
+    ]
+
+    cash = float(initial_capital)
     holdings = {t: 0.0 for t in ANONYMOUS_UNIVERSE}
-    output_filename = "react_results_plain_portfolio.json"
     backtest_results = []
+    target_allocs = {t: 0.0 for t in ANONYMOUS_UNIVERSE}
+    target_allocs["CASH"] = 100.0
 
-    for current_date in trading_days:
-        prices = {t: float(GLOBAL_DATA_CACHE[t].loc[current_date]['Close']) for t in ANONYMOUS_UNIVERSE}
-        total_portfolio_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
-
-        allocations_pct = {t: (holdings[t] * prices[t] / total_portfolio_value * 100.0) for t in ANONYMOUS_UNIVERSE}
-        cash_pct = (cash / total_portfolio_value) * 100.0
-
-        portfolio_state = {
-            "cash": cash,
-            "cash_pct": cash_pct,
-            "portfolio_value": total_portfolio_value,
-            "allocations_pct": allocations_pct
+    for idx, current_date in enumerate(trading_days):
+        close_prices = {
+            t: float(GLOBAL_DATA_CACHE[t].loc[current_date]["Close"])
+            for t in ANONYMOUS_UNIVERSE
         }
 
-        result = run_daily_agent(current_date, portfolio_state)
-        target_pcts = result["allocations"]
+        total_value = cash + sum(
+            holdings[t] * close_prices[t]
+            for t in ANONYMOUS_UNIVERSE
+        )
 
-        # Blind execution without risk filters
-        total_target_pct = sum(target_pcts.values()) if sum(target_pcts.values()) > 0 else 100.0
-        norm_targets = {k: (v / total_target_pct) for k, v in target_pcts.items()}
+        # Signal is generated from the close of the current day.
+        # It is NOT applied until the next trading day's OPEN.
+        if idx % 5 == 0 or idx == 0:
+            allocations_pct = {
+                t: (
+                    (holdings[t] * close_prices[t]) / total_value * 100.0
+                    if total_value > 0 else 0.0
+                )
+                for t in ANONYMOUS_UNIVERSE
+            }
+            allocations_pct["CASH"] = (
+                cash / total_value * 100.0
+                if total_value > 0 else 100.0
+            )
 
-        cash = total_portfolio_value * norm_targets.get("CASH", 0.0)
-        for t in ANONYMOUS_UNIVERSE:
-            target_cash_for_asset = total_portfolio_value * norm_targets.get(t, 0.0)
-            holdings[t] = target_cash_for_asset / prices[t]
+            portfolio_state = {
+                "cash": cash,
+                "cash_pct": allocations_pct["CASH"],
+                "portfolio_value": total_value,
+                "allocations_pct": allocations_pct,
+            }
 
-        new_portfolio_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
+            target_allocs = run_react_agent(
+                current_date,
+                portfolio_state,
+            )
 
-        # Map anonymous tags back to real tickers for output log transparency
-        real_executed = {REVERSE_MAP.get(k, k): round(v * 100, 2) for k, v in norm_targets.items()}
+        # The target generated on day idx-1 is executed at today's OPEN.
+        if idx > 0 and (idx - 1) % 5 == 0:
+            execution_prices = {
+                t: float(GLOBAL_DATA_CACHE[t].loc[current_date]["Open"])
+                for t in ANONYMOUS_UNIVERSE
+            }
 
-        result.update({
-            "portfolio_value": round(new_portfolio_value, 2),
-            "executed_allocations": real_executed
+            execution_value = cash + sum(
+                holdings[t] * execution_prices[t]
+                for t in ANONYMOUS_UNIVERSE
+            )
+
+            total_alloc_sum = sum(target_allocs.values())
+
+            if total_alloc_sum > 0:
+                norm_targets = {
+                    k: v / total_alloc_sum
+                    for k, v in target_allocs.items()
+                }
+            else:
+                norm_targets = {t: 0.0 for t in ANONYMOUS_UNIVERSE}
+                norm_targets["CASH"] = 1.0
+
+            cash = execution_value * norm_targets.get("CASH", 0.0)
+
+            for t in ANONYMOUS_UNIVERSE:
+                p = execution_prices[t]
+                holdings[t] = (
+                    execution_value * norm_targets.get(t, 0.0) / p
+                    if p > 0 else 0.0
+                )
+
+        new_value = cash + sum(
+            holdings[t] * close_prices[t]
+            for t in ANONYMOUS_UNIVERSE
+        )
+
+        real_executed = {
+            REVERSE_MAP.get(k, k): v
+            for k, v in target_allocs.items()
+        }
+        real_prices = {
+            REVERSE_MAP[k]: v
+            for k, v in close_prices.items()
+        }
+
+        backtest_results.append({
+            "date": current_date,
+            "prices": real_prices,
+            "portfolio_value": round(new_value, 2),
+            "harnessed_allocations": real_executed
         })
-        backtest_results.append(result)
 
-        if len(backtest_results) % 10 == 0 or current_date == trading_days[-1]:
-            with open(output_filename, "w") as f:
-                json.dump(backtest_results, f, indent=4)
+    with open(output_file, "w") as f:
+        json.dump(backtest_results, f, indent=4)
 
-        print(f"[{current_date}] Portfolio Value: ${new_portfolio_value:,.2f} | Executed Allocations: {real_executed}")
+    print(
+        f"ReAct No Harness Backtest Complete ({len(tickers)} Assets) -> Saved to {output_file}"
+    )
 
 if __name__ == "__main__":
-    run_backtest(start_date="2023-03-15", end_date="2026-04-01")
+    parser = argparse.ArgumentParser(
+        description="Run ReAct (No Harness) Backtest with a custom portfolio."
+    )
+    parser.add_argument("--tickers", nargs="+", help="List of stock tickers", default=DEFAULT_UNIVERSE)
+    parser.add_argument("--start", type=str, default="2023-03-15", help="Backtest start date")
+    parser.add_argument("--end", type=str, default="2026-04-01", help="Backtest end date")
+    parser.add_argument("--output", type=str, default="react_no_harness_results.json", help="Output JSON filename")
+
+    args = parser.parse_args()
+
+    run_backtest(
+        start_date=args.start,
+        end_date=args.end,
+        tickers=args.tickers,
+        output_file=args.output
+    )
