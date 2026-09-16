@@ -892,172 +892,100 @@ def apply_institutional_harness(
     raw_allocs,
     current_date,
 ):
+    # ----------------------------------------------------------
+    # Step 1: Per-asset conviction scoring
+    # Longer-term momentum weighted more (robust cross-sectional signal).
+    # Asymmetric clip: reward momentum leaders more than we punish laggards.
+    # ----------------------------------------------------------
+    scores = {}
     adjusted = {
-        a: float(
-            raw_allocs.get(a, 0.0)
-        )
+        a: float(raw_allocs.get(a, 0.0))
         for a in ANONYMOUS_UNIVERSE
     }
 
     for asset in ANONYMOUS_UNIVERSE:
-        if adjusted[asset] <= 0:
-            continue
+        closes = GLOBAL_DATA_CACHE[asset].loc[:current_date]["Close"]
+        cp = float(closes.iloc[-1])
 
-        closes = (
-            GLOBAL_DATA_CACHE[asset]
-            .loc[:current_date]["Close"]
-        )
+        m20  = cp / float(closes.iloc[-20])  - 1.0 if len(closes) >= 21  else 0.0
+        m60  = cp / float(closes.iloc[-60])  - 1.0 if len(closes) >= 61  else 0.0
+        m120 = cp / float(closes.iloc[-120]) - 1.0 if len(closes) >= 121 else 0.0
+        composite = 0.20 * m20 + 0.30 * m60 + 0.50 * m120
 
-        cp = float(
-            closes.iloc[-1]
-        )
+        sma50  = float(closes.tail(50).mean())  if len(closes) >= 50  else cp
+        sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else cp
+        trend  = (cp / max(sma50, 1e-9) - 1.0) + (sma50 / max(sma200, 1e-9) - 1.0)
 
-        m20 = (
-            cp / float(closes.iloc[-20]) - 1.0
-            if len(closes) >= 20
-            else 0.0
-        )
+        score = float(np.clip(0.6 * composite + 0.4 * trend, -0.55, 0.80))
+        scores[asset] = score
 
-        m60 = (
-            cp / float(closes.iloc[-60]) - 1.0
-            if len(closes) >= 60
-            else 0.0
-        )
+        if adjusted[asset] > 0:
+            adjusted[asset] *= (1.0 + score)
 
-        m120 = (
-            cp / float(closes.iloc[-120]) - 1.0
-            if len(closes) >= 120
-            else 0.0
-        )
+    # ----------------------------------------------------------
+    # Step 2: Cross-sectional rank tilt
+    # After per-asset scoring, redistribute weight from low-momentum
+    # to high-momentum assets using a linear rank gradient.
+    # ----------------------------------------------------------
+    ranked = sorted(ANONYMOUS_UNIVERSE, key=lambda a: scores.get(a, 0.0), reverse=True)
+    n = len(ranked)
+    for i, asset in enumerate(ranked):
+        rank_pct = i / max(n - 1, 1)          # 0.0 = best, 1.0 = worst
+        tilt = 1.0 + 0.28 * (0.5 - rank_pct)  # 1.14 for top, 0.86 for bottom
+        adjusted[asset] = max(0.0, adjusted[asset] * tilt)
 
-        composite = (
-            0.5 * m20
-            + 0.3 * m60
-            + 0.2 * m120
-        )
-
-        sma50 = (
-            float(closes.tail(50).mean())
-            if len(closes) >= 50
-            else cp
-        )
-
-        sma200 = (
-            float(closes.tail(200).mean())
-            if len(closes) >= 200
-            else cp
-        )
-
-        trend = (
-            cp / sma50 - 1.0
-        ) + (
-            sma50 / sma200 - 1.0
-        )
-
-        score = float(
-            np.clip(
-                0.6 * composite
-                + 0.4 * trend,
-                -0.5,
-                0.5,
-            )
-        )
-
-        adjusted[asset] *= (
-            1.0 + score
-        )
-
-    vec = np.array(
-        [
-            adjusted[a]
-            for a in ANONYMOUS_UNIVERSE
-        ],
-        dtype=float,
-    )
+    # ----------------------------------------------------------
+    # Step 3: Portfolio vol target (25% ceiling → scale to 22%)
+    # Raised from 21.5%→18% to avoid throttling bull-market positions.
+    # ----------------------------------------------------------
+    vec = np.array([adjusted[a] for a in ANONYMOUS_UNIVERSE], dtype=float)
 
     if vec.sum() > 0:
-        returns = {
-            a:
-            GLOBAL_DATA_CACHE[a]
-            .loc[:current_date]["Close"]
-            .pct_change()
-            .dropna()
-            for a in ANONYMOUS_UNIVERSE
-        }
+        ret_df = pd.DataFrame(
+            {
+                a: GLOBAL_DATA_CACHE[a]
+                .loc[:current_date]["Close"]
+                .pct_change()
+                .dropna()
+                for a in ANONYMOUS_UNIVERSE
+            }
+        ).tail(126).fillna(0.0)
 
-        ret_df = (
-            pd.DataFrame(returns)
-            .tail(126)
-            .fillna(0.0)
-        )
+        vol = _portfolio_vol(vec / 100.0, ret_df)
+        if vol > 0.25:
+            vec *= 0.22 / max(vol, 0.01)
 
-        vol = _portfolio_vol(
-            vec / 100.0,
-            ret_df,
-        )
+        adjusted = {a: float(vec[i]) for i, a in enumerate(ANONYMOUS_UNIVERSE)}
 
-        if vol > 0.215:
-            vec *= (
-                0.18 / vol
-            )
-
-        adjusted = {
-            a: float(vec[i])
-            for i, a in enumerate(
-                ANONYMOUS_UNIVERSE
-            )
-        }
-
+    # ----------------------------------------------------------
+    # Step 4: Breadth regime overlay — bidirectional
+    # Scale UP in strong bull regimes, scale DOWN in bear regimes.
+    # ----------------------------------------------------------
     above_200 = 0
-
     for asset in ANONYMOUS_UNIVERSE:
-        closes = (
-            GLOBAL_DATA_CACHE[asset]
-            .loc[:current_date]["Close"]
-        )
+        closes = GLOBAL_DATA_CACHE[asset].loc[:current_date]["Close"]
+        cp = float(closes.iloc[-1])
+        sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else cp
+        above_200 += int(cp >= sma200)
 
-        cp = float(
-            closes.iloc[-1]
-        )
+    ratio = above_200 / max(len(ANONYMOUS_UNIVERSE), 1)
 
-        sma200 = (
-            float(closes.tail(200).mean())
-            if len(closes) >= 200
-            else cp
-        )
+    if ratio >= 0.70:
+        multiplier = 1.15
+    elif ratio >= 0.55:
+        multiplier = 1.07
+    elif ratio >= 0.40:
+        multiplier = 1.00
+    elif ratio >= 0.20:
+        multiplier = 0.60
+    else:
+        multiplier = 0.30
 
-        above_200 += int(
-            cp >= sma200
-        )
+    adjusted = {a: v * multiplier for a, v in adjusted.items()}
 
-    ratio = (
-        above_200
-        / len(ANONYMOUS_UNIVERSE)
-    )
+    cash = max(0.0, 100.0 - sum(adjusted.values()))
 
-    multiplier = (
-        1.0
-        if ratio >= 0.60
-        else 0.80
-        if ratio >= 0.40
-        else 0.50
-        if ratio >= 0.20
-        else 0.25
-    )
-
-    adjusted = {
-        a: v * multiplier
-        for a, v in adjusted.items()
-    }
-
-    cash = max(
-        0.0,
-        100.0 - sum(adjusted.values()),
-    )
-
-    return normalize_allocations(
-        adjusted | {"CASH": cash}
-    )
+    return normalize_allocations(adjusted | {"CASH": cash})
 
 
 # ============================================================
