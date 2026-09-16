@@ -1,6 +1,6 @@
 import argparse
 import json
-import os
+import random
 import re
 
 import numpy as np
@@ -110,6 +110,18 @@ def setup_universe(tickers):
     )
 
     GLOBAL_DATA_CACHE.clear()
+    PRICE_INDEX_BASE.clear()
+    DISPLAY_MAP.clear()
+    DISPLAY_REVERSE.clear()
+
+def reshuffle_display_map():
+    """Shuffle which display label each internal asset gets this rebalance period."""
+    global DISPLAY_MAP, DISPLAY_REVERSE
+    n = len(ANONYMOUS_UNIVERSE)
+    labels = [f"ASSET_{chr(65+i)}" for i in range(n)]
+    random.shuffle(labels)
+    DISPLAY_MAP = {internal: display for internal, display in zip(ANONYMOUS_UNIVERSE, labels)}
+    DISPLAY_REVERSE = {v: k for k, v in DISPLAY_MAP.items()}
 
 
 # ============================================================
