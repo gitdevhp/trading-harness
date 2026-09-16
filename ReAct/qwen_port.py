@@ -1,13 +1,12 @@
 import argparse
 import json
-import os
+import random
 import re
-import sys
-import numpy as np
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
 
+import os
 os.environ["YFINANCE_CACHE_DIR"] = "/tmp/yf_cache"
 yf.set_tz_cache_location("/tmp/yf_tz_cache")
 
@@ -22,13 +21,31 @@ REVERSE_MAP = {}
 ANONYMOUS_UNIVERSE = []
 GLOBAL_DATA_CACHE = {}
 
+# Per-rebalance display shuffle state
+PRICE_INDEX_BASE = {}  # internal label → base price at backtest start
+DISPLAY_MAP = {}       # internal label → shuffled display label (changes each rebalance)
+DISPLAY_REVERSE = {}   # shuffled display label → internal label
+
 def setup_universe(tickers: list):
     global RAW_UNIVERSE, ANONYMOUS_MAP, REVERSE_MAP, ANONYMOUS_UNIVERSE, GLOBAL_DATA_CACHE
+    global PRICE_INDEX_BASE, DISPLAY_MAP, DISPLAY_REVERSE
     RAW_UNIVERSE = [t.upper() for t in tickers]
     ANONYMOUS_MAP = {ticker: f"ASSET_{chr(65+i)}" for i, ticker in enumerate(RAW_UNIVERSE)}
     REVERSE_MAP = {v: k for k, v in ANONYMOUS_MAP.items()}
     ANONYMOUS_UNIVERSE = list(ANONYMOUS_MAP.values())
     GLOBAL_DATA_CACHE.clear()
+    PRICE_INDEX_BASE.clear()
+    DISPLAY_MAP.clear()
+    DISPLAY_REVERSE.clear()
+
+def reshuffle_display_map():
+    """Shuffle which display label each internal asset gets this rebalance period."""
+    global DISPLAY_MAP, DISPLAY_REVERSE
+    n = len(ANONYMOUS_UNIVERSE)
+    labels = [f"ASSET_{chr(65+i)}" for i in range(n)]
+    random.shuffle(labels)
+    DISPLAY_MAP = {internal: display for internal, display in zip(ANONYMOUS_UNIVERSE, labels)}
+    DISPLAY_REVERSE = {v: k for k, v in DISPLAY_MAP.items()}
 
 def prefetch_data(start_date: str, end_date: str):
     lookback_start = (pd.to_datetime(start_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
@@ -42,15 +59,22 @@ def prefetch_data(start_date: str, end_date: str):
             df = df.dropna(subset=required_cols)
         GLOBAL_DATA_CACHE[ANONYMOUS_MAP[ticker]] = df
 
-def run_raw_qwen_agent(current_date: str, holdings_prices: dict) -> dict:
-    price_context = ", ".join([f"{a}: ${holdings_prices[a]:.2f}" for a in ANONYMOUS_UNIVERSE])
+def run_raw_qwen_agent(current_date: str, price_index: dict) -> dict:
+    """
+    price_index: {internal_label: current/base * 100} — normalized, no absolute prices.
+    Returns allocations keyed by internal labels.
+    """
+    display_universe = [DISPLAY_MAP[a] for a in ANONYMOUS_UNIVERSE]
+    price_context = ", ".join(
+        [f"{DISPLAY_MAP[a]}: {price_index[a]:.1f}" for a in ANONYMOUS_UNIVERSE]
+    )
 
     prompt = f"""Date: {current_date}
-Asset Prices: {price_context}
+Asset Price Indices (base=100 at backtest start): {price_context}
 
-Provide percentage target allocations for: {ANONYMOUS_UNIVERSE} + CASH.
+Provide percentage target allocations for: {display_universe} + CASH.
 Percentages must sum to exactly 100.
-Format output strictly as JSON: {{"ASSET_A": 10, "ASSET_B": 10, ..., "CASH": 0}}"""
+Format output strictly as JSON: {{"{display_universe[0]}": 10, "{display_universe[1]}": 10, ..., "CASH": 0}}"""
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
@@ -63,7 +87,12 @@ Format output strictly as JSON: {{"ASSET_A": 10, "ASSET_B": 10, ..., "CASH": 0}}
     parsed = re.findall(r'["\']?([A-Za-z0-9_]+)["\']?\s*:\s*([\d\.-]+)', reply)
 
     if parsed:
-        allocs = {k: float(v) for k, v in parsed}
+        display_allocs = {k: float(v) for k, v in parsed}
+        # Map display labels back to internal labels; CASH passes through unchanged
+        allocs = {}
+        for k, v in display_allocs.items():
+            internal = DISPLAY_REVERSE.get(k, k)
+            allocs[internal] = v
     else:
         allocs = {a: 10.0 for a in ANONYMOUS_UNIVERSE}
         allocs["CASH"] = 0.0
@@ -103,13 +132,24 @@ def run_backtest(
         }
         total_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
 
-        # Signal is generated from today's close.
-        # Execution occurs at the NEXT trading day's OPEN.
-        if idx % 5 == 0 or idx == 0:
-            target_allocs = run_raw_qwen_agent(current_date, prices)
+        # Initialise base prices at the first observation
+        if idx == 0:
+            for a in ANONYMOUS_UNIVERSE:
+                PRICE_INDEX_BASE[a] = prices[a]
 
+        # Compute normalized price index (100 = backtest start price)
+        price_index = {
+            a: prices[a] / PRICE_INDEX_BASE[a] * 100.0
+            for a in ANONYMOUS_UNIVERSE
+        }
+
+        # Generate signal at close; new shuffle each rebalance period
+        if idx % 5 == 0 or idx == 0:
+            reshuffle_display_map()
+            target_allocs = run_raw_qwen_agent(current_date, price_index)
+
+        # Execute at next session's open (one bar after signal)
         if idx > 0 and ((idx - 1) % 5 == 0 or idx == 1):
-            prior_date = trading_days[idx - 1]
             execution_prices = {
                 t: float(GLOBAL_DATA_CACHE[t].loc[current_date]["Open"])
                 for t in ANONYMOUS_UNIVERSE
@@ -122,10 +162,7 @@ def run_backtest(
 
             total_alloc_sum = sum(target_allocs.values())
             if total_alloc_sum > 0:
-                norm_targets = {
-                    k: (v / total_alloc_sum)
-                    for k, v in target_allocs.items()
-                }
+                norm_targets = {k: (v / total_alloc_sum) for k, v in target_allocs.items()}
             else:
                 norm_targets = {t: 0.0 for t in ANONYMOUS_UNIVERSE}
                 norm_targets["CASH"] = 1.0
@@ -139,13 +176,9 @@ def run_backtest(
                     if p > 0 else 0.0
                 )
 
-        new_value = cash + sum(
-            holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE
-        )
+        new_value = cash + sum(holdings[t] * prices[t] for t in ANONYMOUS_UNIVERSE)
 
-        real_executed = {
-            REVERSE_MAP.get(k, k): v for k, v in target_allocs.items()
-        }
+        real_executed = {REVERSE_MAP.get(k, k): v for k, v in target_allocs.items()}
         real_prices = {REVERSE_MAP[k]: v for k, v in prices.items()}
 
         backtest_results.append({

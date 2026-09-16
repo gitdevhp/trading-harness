@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+import random
 import re
 import sys
 import numpy as np
@@ -24,17 +25,34 @@ ANONYMOUS_UNIVERSE = []
 GLOBAL_DATA_CACHE = {}
 POSITION_PEAKS = {}
 
+PRICE_INDEX_BASE = {}
+DISPLAY_MAP = {}
+DISPLAY_REVERSE = {}
+
 def setup_universe(tickers: list):
     """Dynamically sets up asset mapping and resets global caches."""
     global RAW_UNIVERSE, ANONYMOUS_MAP, REVERSE_MAP, ANONYMOUS_UNIVERSE, GLOBAL_DATA_CACHE, POSITION_PEAKS
-    
+    global PRICE_INDEX_BASE, DISPLAY_MAP, DISPLAY_REVERSE
+
     RAW_UNIVERSE = [t.upper() for t in tickers]
     ANONYMOUS_MAP = {ticker: f"ASSET_{chr(65+i)}" for i, ticker in enumerate(RAW_UNIVERSE)}
     REVERSE_MAP = {v: k for k, v in ANONYMOUS_MAP.items()}
     ANONYMOUS_UNIVERSE = list(ANONYMOUS_MAP.values())
-    
+
     GLOBAL_DATA_CACHE.clear()
     POSITION_PEAKS.clear()
+    PRICE_INDEX_BASE.clear()
+    DISPLAY_MAP.clear()
+    DISPLAY_REVERSE.clear()
+
+def reshuffle_display_map():
+    """Shuffle which display label each internal asset gets this rebalance period."""
+    global DISPLAY_MAP, DISPLAY_REVERSE
+    n = len(ANONYMOUS_UNIVERSE)
+    labels = [f"ASSET_{chr(65+i)}" for i in range(n)]
+    random.shuffle(labels)
+    DISPLAY_MAP = {internal: display for internal, display in zip(ANONYMOUS_UNIVERSE, labels)}
+    DISPLAY_REVERSE = {v: k for k, v in DISPLAY_MAP.items()}
 
 def prefetch_data(start_date: str, end_date: str):
     lookback_start = (pd.to_datetime(start_date) - pd.Timedelta(days=365)).strftime("%Y-%m-%d")
@@ -153,28 +171,34 @@ def apply_institutional_risk_harness(
 
     return final_targets
 
-def get_market_screener(current_date: str) -> str:
+def get_market_screener(current_date: str, price_index: dict) -> str:
     screener = []
     for asset in ANONYMOUS_UNIVERSE:
+        display = DISPLAY_MAP[asset]
         closes = GLOBAL_DATA_CACHE[asset].loc[:current_date]["Close"]
         cp = float(closes.iloc[-1])
         sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else cp
+        above_200d = cp >= sma200
         mom120 = ((cp - float(closes.iloc[-120])) / float(closes.iloc[-120])) * 100.0 if len(closes) >= 120 else 0.0
-        screener.append(f"{asset}: Price=${cp:.2f} | 200d-SMA=${sma200:.2f} | 120d-Mom={mom120:.1f}%")
+        idx = price_index.get(asset, 100.0)
+        screener.append(f"{display}: Idx={idx:.1f} | Above200d={above_200d} | 120d-Mom={mom120:.1f}%")
     return "\n".join(screener)
 
-def run_react_agent(current_date: str, portfolio_state: dict) -> dict:
+def run_react_agent(current_date: str, portfolio_state: dict, price_index: dict) -> dict:
+    display_universe = [DISPLAY_MAP[a] for a in ANONYMOUS_UNIVERSE]
+
     def get_portfolio_status(arg: str = "") -> str:
         alloc_str = ", ".join([f"{k}: {v:.1f}%" for k, v in portfolio_state["allocations_pct"].items()])
-        return f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | Cash: {portfolio_state['cash_pct']:.1f}%\nAllocations: {alloc_str}"
+        return f"Portfolio Value (normalized) | Cash: {portfolio_state['cash_pct']:.1f}%\nAllocations: {alloc_str}"
 
     def tool_screener(arg: str = "") -> str:
-        return get_market_screener(current_date)
+        return get_market_screener(current_date, price_index)
 
     available_tools = {"get_market_screener": tool_screener, "get_portfolio_status": get_portfolio_status}
 
+    first_display = display_universe[0] if display_universe else "ASSET_A"
     system_prompt = f"""You are an autonomous ReAct Portfolio Manager on {current_date}.
-Assets: {ANONYMOUS_UNIVERSE} + CASH
+Assets: {display_universe} + CASH
 
 Tools:
 - get_market_screener[]
@@ -186,7 +210,7 @@ Action: <tool_name>[]
 Observation: <tool response>
 ...
 Thought: <Final allocation decision>
-Action: Target_Allocations[{{\"ASSET_A\": 15, \"ASSET_B\": 15, ..., \"CASH\": 10}}]"""
+Action: Target_Allocations[{{"{first_display}": 15, ..., "CASH": 10}}]"""
 
     messages = [
         {"role": "system", "content": system_prompt},
@@ -209,7 +233,11 @@ Action: Target_Allocations[{{\"ASSET_A\": 15, \"ASSET_B\": 15, ..., \"CASH\": 10
             if action_name == "Target_Allocations":
                 parsed = re.findall(r'["\']?([A-Za-z0-9_]+)["\']?\s*:\s*([\d\.-]+)', action_arg)
                 if parsed:
-                    raw_decision = {k: float(v) for k, v in parsed}
+                    display_allocs = {k: float(v) for k, v in parsed}
+                    raw_decision = {}
+                    for k, v in display_allocs.items():
+                        internal = DISPLAY_REVERSE.get(k, k)
+                        raw_decision[internal] = v
                 break
 
             if action_name in available_tools:
@@ -271,9 +299,20 @@ def run_backtest(
             if total_value > 0 else 100.0
         )
 
+        # Initialise base prices at the first observation
+        if idx == 0:
+            for a in ANONYMOUS_UNIVERSE:
+                PRICE_INDEX_BASE[a] = close_prices[a]
+
+        price_index = {
+            a: close_prices[a] / PRICE_INDEX_BASE[a] * 100.0
+            for a in ANONYMOUS_UNIVERSE
+        }
+
         # Generate the signal from the current day's CLOSE.
         # The signal is deliberately NOT executed at this same close.
         if idx % 5 == 0 or idx == 0:
+            reshuffle_display_map()
             portfolio_state = {
                 "cash": cash,
                 "cash_pct": allocations_pct["CASH"],
@@ -283,6 +322,7 @@ def run_backtest(
             raw_target_allocs = run_react_agent(
                 current_date,
                 portfolio_state,
+                price_index,
             )
             last_raw_allocs = raw_target_allocs
         else:
