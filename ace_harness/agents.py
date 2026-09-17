@@ -320,21 +320,18 @@ class Debater:
     def intra_task_review(self, current_date, screener_text, portfolio_status_text,
                            proposed_allocations, playbook_text=None, round_num=1):
         memory_block = f"\n\nExperience memory context:\n{playbook_text}\n" if playbook_text else ""
-        system_prompt = f"""You are a portfolio Debater pressure-testing a proposal BEFORE execution (round {round_num}). Your job is to find the STRONGEST argument against the current proposal — either that it is leaving alpha on the table by under-sizing strong signals, or that it is taking excessive risk by over-sizing weak signals.
-
-IMPORTANT: Default toward "revise" unless you can demonstrate that EVERY significant position is well-justified by the screener data. A lazy "accept" that doesn't examine the evidence carefully is a failure of your role. Scrutinize each position above 10% individually.
-
-You must argue in EITHER direction based solely on what the screener shows:
-- Argue "increase_conviction" when: an asset has 6M-Mom > 10%, price above 50d-SMA AND 200d-SMA, but the proposal allocates it < 10%. Leaving a strong trend under-weighted is a real error.
-- Argue "decrease_risk" when: a position >= 15% has negative 6M-Mom OR price below 50d-SMA OR 1M-Vol > 30%. Concentration in weak/volatile assets without supporting signals is a real error.
-- Concede "accept" ONLY when you have checked each position >= 10% against the screener and found all of them genuinely justified by the evidence. "Accept" requires you to name at least one specific screener metric that backs the largest position.
-You do NOT know future prices — argue only from what the screener shows right now.
+        system_prompt = f"""You are a portfolio Debater pressure-testing a proposal BEFORE execution (round {round_num}). Your job is to check whether the SIZING matches the evidence — not to reflexively push toward caution.
+You must be willing to argue in EITHER direction, based only on what the screener actually shows:
+- Argue for MORE conviction / a LARGER position when an asset shows strong, aligned signals (e.g. positive momentum across multiple windows, price above both 50d and 200d SMA, healthy breadth) but the proposal sizes it small or excludes it — being needlessly cautious in the face of a strong signal is a real error, not a safe default.
+- Argue for LESS conviction / a SMALLER position or more diversification when a position is large relative to weak, mixed, or contradictory signals, or when turnover looks excessive given trading fees.
+- Concede ("accept") when the sizing is actually proportionate to the strength of the evidence, in either direction.
+You do NOT know future prices — never argue from hindsight, only from what's in the screener right now.
 {memory_block}
-Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook.
+Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
 {_LESSON_QUALITY_BAR}
 
 Respond ONLY with JSON, no other text:
-{{"verdict": "accept" or "revise", "direction": "increase_conviction" or "decrease_risk" or "well_calibrated", "feedback": "2-4 sentences citing specific screener values to support your verdict", "lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}]}}"""
+{{"verdict": "accept" or "revise", "direction": "increase_conviction" or "decrease_risk" or "well_calibrated", "feedback": "1-3 sentences making your strongest argument in that direction, or why you concede it", "lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}]}}"""
         user_prompt = f"""Date: {current_date}
 Market screener:
 {screener_text}
