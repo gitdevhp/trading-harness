@@ -179,7 +179,7 @@ def _clean_download(df):
 
     df = df[
         ~df.index.duplicated(
-            keep="first"
+            keep="last"
         )
     ]
 
@@ -284,15 +284,6 @@ def prefetch_data(
     start_date,
     end_date,
 ):
-
-    # --------------------------------------------------------
-    # PRICE-ONLY BASELINE
-    #
-    # No additional historical lookback is downloaded.
-    #
-    # The ReAct No-Harness model receives only the current
-    # price at each decision date.
-    # --------------------------------------------------------
 
     download_start = (
         pd.to_datetime(
@@ -479,9 +470,6 @@ def build_market_snapshot(
     No technical indicators.
     No rule-based signals.
     No harness logic.
-
-    This is intentionally the same market information
-    supplied to the pure Raw Qwen baseline.
     """
 
     current_dt = pd.to_datetime(
@@ -600,15 +588,6 @@ def DECISION_FUNCTION(
         "get_market_screener": market,
         "get_portfolio_status": portfolio,
     }
-
-    # --------------------------------------------------------
-    # REACT SYSTEM
-    #
-    # This is the only major difference from the Raw Qwen
-    # baseline.
-    #
-    # Market information itself remains price-only.
-    # --------------------------------------------------------
 
     system = f"""
 You are an autonomous ReAct Portfolio Manager.
