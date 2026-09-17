@@ -31,7 +31,7 @@ client = OpenAI(
     api_key="EMPTY",
 )
 
-MODEL_NAME = "Qwen/Qwen3.6-35B-A3B-FP8"
+MODEL_NAME = os.environ.get("REACT_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
 # MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct-AWQ"
 
 
