@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+
+# Distribution / packaging
+*.whl
+*.tar.gz
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and temp outputs
+*.log
+/log/
+
+# Model / data caches
+hf_cache/
+*.cache
+
+# Test / result artefacts (large JSON outputs)
+# Uncomment if you want to exclude backtest results:
+# *.json
