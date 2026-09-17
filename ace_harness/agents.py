@@ -200,7 +200,7 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                           "allocations using only the provided assets and CASH.")
         return system_prompt, user_content, invalid_nudge
 
-    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None):
+    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None):
         u = self.universe
         tools = self._tools(current_date, portfolio_state)
         tools_list = "\n".join(f"- {name}[]" for name in tools)
@@ -209,10 +209,16 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
             f"\n\nEXPERIENCE MEMORY (lessons from prior tasks — weigh higher helpful/harmful counts more):\n{playbook_text}\n"
             if playbook_text else ""
         )
-        feedback_block = (
-            f"\n\nDEBATER'S ARGUMENT AGAINST YOUR PRIOR PROPOSAL THIS TASK (address before finalizing):\n{feedback_text}\n"
-            if feedback_text else ""
-        )
+        if feedback_text:
+            if direction == "increase_conviction":
+                label = "DEBATER ARGUES YOU ARE UNDERSIZING A STRONG SIGNAL — address before finalizing:"
+            elif direction == "decrease_risk":
+                label = "DEBATER CHALLENGES THIS POSITION SIZE — address before finalizing:"
+            else:
+                label = "DEBATER'S REVIEW OF YOUR PRIOR PROPOSAL — address before finalizing:"
+            feedback_block = f"\n\n{label}\n{feedback_text}\n"
+        else:
+            feedback_block = ""
 
         system_prompt, user_content, invalid_nudge = self._build_prompt(
             current_date, rebalance_days, tools_list, memory_block, feedback_block
@@ -326,6 +332,8 @@ You must be willing to argue in EITHER direction, based only on what the screene
 - Argue for LESS conviction / a SMALLER position or more diversification when a position is large relative to weak, mixed, or contradictory signals, or when turnover looks excessive given trading fees.
 - Concede ("accept") when the sizing is actually proportionate to the strength of the evidence, in either direction.
 You do NOT know future prices — never argue from hindsight, only from what's in the screener right now.
+IMPORTANT: A risk harness (volatility targeting, position caps, drawdown limits) is applied AFTER this proposal is finalized. It already handles generic risk guardrails. Your job is NOT to fine-tune position sizes out of general caution — it is to catch SIGNAL MISREADS: wrong direction on an asset, a missed strong signal that was priced out, or a large position with directly contradictory screener metrics. If the sizing looks reasonable given the signals, concede.
+If you argue "decrease_risk", you MUST cite the SPECIFIC screener metric and value that directly contradicts the proposed position (e.g. "6M-Mom is -8% yet allocated 20%"). Without a named, checkable metric that contradicts the sizing, verdict must be "accept".
 {memory_block}
 Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
 {_LESSON_QUALITY_BAR}

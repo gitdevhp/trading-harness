@@ -77,13 +77,16 @@ def make_intra_task(universe, solver, debater, max_rounds: int = 3):
         feedback = None
         raw_alloc, trace, rounds_log = None, None, []
 
+        direction = None
         for r in range(1, max_rounds + 1):
-            raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days, feedback_text=feedback)
+            raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
+                                              feedback_text=feedback, direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc, round_num=r)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
             if review["verdict"] == "accept":
                 break
             feedback = review["feedback"]
+            direction = review.get("direction")
 
         return raw_alloc, {"rounds": rounds_log}
     return decision_fn
@@ -173,11 +176,13 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
         playbook_text = memory.format_for_prompt()
 
         feedback = None
+        direction = None
         raw_alloc, trace, rounds_log, all_lessons = None, None, [], []
 
         for r in range(1, max_rounds + 1):
             raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                              playbook_text=playbook_text, feedback_text=feedback)
+                                              playbook_text=playbook_text, feedback_text=feedback,
+                                              direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
                                                 playbook_text=playbook_text, round_num=r)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
@@ -185,6 +190,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
             if review["verdict"] == "accept":
                 break
             feedback = review["feedback"]
+            direction = review.get("direction")
 
         ops = consolidator.consolidate(memory, all_lessons, memory.sections)
         memory.apply_delta_ops(ops)
@@ -224,12 +230,14 @@ def make_dual_session(universe, solver, debater, consolidator, max_rounds: int =
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
                         f"Cash: {portfolio_state['cash_pct']:.1f}%")
         feedback = None
+        direction = None
         raw_alloc, trace, rounds_log = None, None, []
 
         for r in range(1, max_rounds + 1):
             playbook_text = session_memory.format_for_prompt()
             raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                              playbook_text=playbook_text, feedback_text=feedback)
+                                              playbook_text=playbook_text, feedback_text=feedback,
+                                              direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
                                                 playbook_text=playbook_text, round_num=r)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
@@ -240,6 +248,7 @@ def make_dual_session(universe, solver, debater, consolidator, max_rounds: int =
             if review["verdict"] == "accept":
                 break
             feedback = review["feedback"]
+            direction = review.get("direction")
 
         meta = {"rounds": rounds_log, "session_bullets_at_end": len(session_memory.bullets)}
         if risk_harness is not None:
@@ -333,7 +342,8 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
             final_alloc = first_alloc
         else:
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                        playbook_text=playbook_text, feedback_text=review["feedback"])
+                                                        playbook_text=playbook_text, feedback_text=review["feedback"],
+                                                        direction=review.get("direction"))
             # Review the revised allocation so the Debater can check whether the
             # Solver actually addressed its concern, and extract any new lessons.
             second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,

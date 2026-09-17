@@ -165,14 +165,20 @@ def _price_df(universe, start, end):
 
 
 def _rebalance_dates(price_df, freq="month"):
-    """First trading day of each new calendar month."""
-    idx = pd.DatetimeIndex(price_df.index)
+    """First trading day of each new calendar month.
+
+    Returns index values in the same type as price_df.index so that
+    ``d in rebal_set`` comparisons inside _run_strategy always work
+    regardless of whether the index is strings or Timestamps.
+    """
+    orig_index = list(price_df.index)
+    ts_index = pd.DatetimeIndex(orig_index)
     dates = []
     prev_month = None
-    for d in idx:
-        m = (d.year, d.month)
+    for orig, ts in zip(orig_index, ts_index):
+        m = (ts.year, ts.month)
         if m != prev_month:
-            dates.append(d)
+            dates.append(orig)
             prev_month = m
     return dates
 
