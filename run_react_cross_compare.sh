@@ -80,7 +80,26 @@ VLLM_PID=""
 # vLLM LIFECYCLE HELPERS
 # ============================================================
 
+clear_port() {
+    local pids
+    pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "WARNING: Port ${VLLM_PORT} in use by PID(s) ${pids}. Killing..."
+        # shellcheck disable=SC2086
+        kill -TERM $pids 2>/dev/null || true
+        sleep 5
+        pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            # shellcheck disable=SC2086
+            kill -9 $pids 2>/dev/null || true
+            sleep 3
+        fi
+    fi
+}
+
 start_vllm() {
+    clear_port
+
     echo "Starting vLLM..."
     python -m vllm.entrypoints.openai.api_server "$@" &
     VLLM_PID=$!
@@ -102,7 +121,18 @@ start_vllm() {
         sleep 5
     done
     echo "vLLM ready."
-    curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models"
+
+    # Verify the correct model is actually being served before running any scripts.
+    local served_model
+    served_model=$(curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" | \
+        python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || echo "unknown")
+    if [ "$served_model" != "$REACT_MODEL" ]; then
+        echo "ERROR: Expected model '${REACT_MODEL}' but port ${VLLM_PORT} is serving '${served_model}'."
+        echo "A stale vLLM process may still be running. Aborting."
+        stop_vllm
+        exit 1
+    fi
+    echo "Verified: serving ${served_model}"
     echo ""
     nvidia-smi
     echo ""
@@ -114,8 +144,17 @@ stop_vllm() {
         kill "$VLLM_PID" 2>/dev/null || true
         wait "$VLLM_PID" 2>/dev/null || true
         VLLM_PID=""
-        echo "vLLM stopped."
     fi
+    # Kill any remaining process still holding the port.
+    local pids
+    pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        echo "Killing stale process(es) on port ${VLLM_PORT}: ${pids}"
+        # shellcheck disable=SC2086
+        kill -9 $pids 2>/dev/null || true
+        sleep 3
+    fi
+    echo "vLLM stopped."
 }
 
 cleanup() {
