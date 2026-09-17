@@ -97,7 +97,6 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        memory.seed_with_principles()
         decision_fn = harnesses.make_inter_task(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -108,7 +107,6 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        memory.seed_with_principles()
         decision_fn = harnesses.make_dual_timescale(
             universe, solver, debater, Consolidator(), memory, memory_path, max_rounds=max_rounds,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -124,7 +122,6 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        memory.seed_with_principles()
         decision_fn = harnesses.make_memory_only(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -135,7 +132,6 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        memory.seed_with_principles()
         decision_fn = harnesses.make_dual_permanent(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
