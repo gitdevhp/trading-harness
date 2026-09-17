@@ -1,7 +1,9 @@
 import argparse
 import json
+import os
 import random
 import re
+import time
 
 import numpy as np
 import pandas as pd
@@ -147,7 +149,7 @@ def _clean_download(df):
 
     df = df[
         ~df.index.duplicated(
-            keep="first"
+            keep="last"
         )
     ]
 
@@ -200,10 +202,6 @@ def prefetch_data(start_date, end_date):
 
         df = None
 
-        # ----------------------------------------------------
-        # Primary download
-        # ----------------------------------------------------
-
         try:
             df = yf.download(
                 ticker,
@@ -220,10 +218,6 @@ def prefetch_data(start_date, end_date):
                 f"WARNING: yf.download failed "
                 f"for {ticker}: {e}"
             )
-
-        # ----------------------------------------------------
-        # Fallback to Ticker.history()
-        # ----------------------------------------------------
 
         if df is None or df.empty:
 
@@ -247,10 +241,6 @@ def prefetch_data(start_date, end_date):
                     f"Could not download usable "
                     f"data for {ticker}: {e}"
                 )
-
-        # ----------------------------------------------------
-        # Clean and validate
-        # ----------------------------------------------------
 
         try:
             cleaned = _clean_download(df)
