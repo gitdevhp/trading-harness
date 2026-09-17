@@ -327,14 +327,21 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
                                             playbook_text=playbook_text, round_num=1)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
 
+        all_lessons = list(review.get("lessons", []))
+
         if review["verdict"] == "accept":
             final_alloc = first_alloc
         else:
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=playbook_text, feedback_text=review["feedback"])
-            rounds_log.append({"round": 2, "allocations": final_alloc, "review": None})
+            # Review the revised allocation so the Debater can check whether the
+            # Solver actually addressed its concern, and extract any new lessons.
+            second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
+                                                       playbook_text=playbook_text, round_num=2)
+            all_lessons.extend(second_review.get("lessons", []))
+            rounds_log.append({"round": 2, "allocations": final_alloc, "review": second_review})
 
-        ops = consolidator.consolidate(memory, review.get("lessons", []), memory.sections)
+        ops = consolidator.consolidate(memory, all_lessons, memory.sections)
         memory.apply_delta_ops(ops)
         memory.save(memory_path)
 
