@@ -59,7 +59,15 @@ def load_result(path):
     values = np.array([r["portfolio_value"] for r in data], dtype=float)
     label = os.path.splitext(os.path.basename(path))[0]
     label = label.replace("monthly_", "").replace("_results", "")
-    return {"label": label, "dates": dates, "values": values}
+
+    # Extract per-day prices embedded by engine_monthly.py into each record
+    price_records = {}
+    for r in data:
+        p = r.get("prices")
+        if isinstance(p, dict) and p:
+            price_records[r["date"]] = p
+
+    return {"label": label, "dates": dates, "values": values, "price_records": price_records}
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +401,45 @@ def black_litterman_curve(price_df, initial_capital, lookback=126, tau=0.025, ri
 
 
 # ---------------------------------------------------------------------------
+# Build price DataFrame from embedded result-file prices
+# ---------------------------------------------------------------------------
+
+def _build_price_df_from_embedded(results):
+    """Build a (date x ticker) price DataFrame from the 'prices' field embedded
+    in each daily record by engine_monthly.py.  Uses the first result file that
+    carries enough price data.  Keeps only tickers present on ≥80% of trading
+    days so that dropna() doesn't wipe everything when a stock briefly goes
+    missing."""
+    if not _HAS_PANDAS:
+        return None
+
+    for res in results:
+        price_records = res.get("price_records", {})
+        if len(price_records) < 5:
+            continue
+
+        dates = sorted(price_records.keys())
+
+        # Count how many days each ticker appears
+        ticker_counts: dict = {}
+        for day_prices in price_records.values():
+            for t in day_prices:
+                ticker_counts[t] = ticker_counts.get(t, 0) + 1
+
+        threshold = 0.80 * len(dates)
+        tickers = sorted(t for t, cnt in ticker_counts.items() if cnt >= threshold)
+        if not tickers:
+            continue
+
+        data = {t: [price_records[d].get(t, float("nan")) for d in dates] for t in tickers}
+        df = pd.DataFrame(data, index=dates).dropna()
+        if len(df) > 5:
+            return df
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Reporting
 # ---------------------------------------------------------------------------
 
@@ -414,63 +461,66 @@ _SYSTEM_COLORS = [
 def generate_report(results, output_dir, tickers=None, start=None, end=None,
                     initial_capital=1_000_000.0):
     """
-    results: list of dicts with keys 'label', 'dates', 'values'
+    results: list of dicts with keys 'label', 'dates', 'values', 'price_records'
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # Build equal-weight baseline from price data (needed for alpha/beta)
     ew_values = None
     baselines = {}
 
-    if tickers and start and end and _HAS_PANDAS:
+    # ── Primary path: build price_df from the prices embedded in each result
+    #    record (written by engine_monthly.py).  This guarantees the baselines
+    #    use the exact same stocks and prices the ACE systems saw, even when the
+    #    universe changes between experiments.
+    price_df = _build_price_df_from_embedded(results) if _HAS_PANDAS else None
+
+    # ── Fallback: fetch from MarketUniverse when embedded prices are absent
+    #    (e.g. result files produced by an older engine version).
+    if price_df is None and tickers and start and end and _HAS_PANDAS:
         try:
             from ace_harness.market import MarketUniverse
             universe = MarketUniverse(tickers)
             universe.prefetch(start, end)
 
-            # Build price DataFrame from prefetched data_cache
-            records = {}
+            common = universe.common_trading_days(start, end)
+            matrix = {}
             for anon, df_raw in universe.data_cache.items():
-                closes = df_raw["Close"].loc[start:end]
-                if not closes.empty:
-                    records[anon] = closes.values.tolist()
+                s = df_raw["Close"].loc[start:end]
+                s.index = s.index.strftime("%Y-%m-%d")
+                matrix[anon] = [float(s.get(d, float("nan"))) for d in common]
+            df_mu = pd.DataFrame(matrix, index=common).dropna()
+            if len(df_mu) > 5:
+                price_df = df_mu
+        except Exception as e:
+            print(f"[plot_results] MarketUniverse fallback skipped: {e}")
 
-            if records:
-                # Use common trading days
-                common = universe.common_trading_days(start, end)
-                cols = list(records.keys())
-                matrix = {}
-                for anon, df_raw in universe.data_cache.items():
-                    if anon in records:
-                        s = df_raw["Close"].loc[start:end]
-                        s.index = s.index.strftime("%Y-%m-%d")
-                        matrix[anon] = [float(s.get(d, float("nan"))) for d in common]
-                df = pd.DataFrame(matrix, index=common).dropna()
-                if len(df) > 5:
-                    ew_vals = equal_weight_curve(df, initial_capital)
-                    baselines["Equal-Weight"] = ew_vals
-                    ew_values = ew_vals
+    # ── Compute baselines from whichever price_df we got
+    if price_df is not None and len(price_df) > 5:
+        try:
+            ew_vals = equal_weight_curve(price_df, initial_capital)
+            baselines["Equal-Weight"] = ew_vals
+            ew_values = ew_vals
 
-                    rp = risk_parity_curve(df, initial_capital)
-                    if rp is not None:
-                        baselines["Risk-Parity"] = rp
+            rp = risk_parity_curve(price_df, initial_capital)
+            if rp is not None:
+                baselines["Risk-Parity"] = rp
 
-                    s60 = sixty_forty_curve(df, initial_capital)
-                    if s60 is not None:
-                        baselines["60/40"] = s60
+            s60 = sixty_forty_curve(price_df, initial_capital)
+            if s60 is not None:
+                baselines["60/40"] = s60
 
-                    if _HAS_SCIPY:
-                        mv = min_variance_curve(df, initial_capital)
-                        if mv is not None:
-                            baselines["Min-Variance"] = mv
+            if _HAS_SCIPY:
+                mv = min_variance_curve(price_df, initial_capital)
+                if mv is not None:
+                    baselines["Min-Variance"] = mv
 
-                        crp = cov_risk_parity_curve(df, initial_capital)
-                        if crp is not None:
-                            baselines["Cov-Risk-Parity"] = crp
+                crp = cov_risk_parity_curve(price_df, initial_capital)
+                if crp is not None:
+                    baselines["Cov-Risk-Parity"] = crp
 
-                        bl = black_litterman_curve(df, initial_capital)
-                        if bl is not None:
-                            baselines["Black-Litterman"] = bl
+                bl = black_litterman_curve(price_df, initial_capital)
+                if bl is not None:
+                    baselines["Black-Litterman"] = bl
         except Exception as e:
             print(f"[plot_results] baseline computation skipped: {e}")
 
