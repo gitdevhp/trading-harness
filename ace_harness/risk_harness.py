@@ -331,18 +331,24 @@ class SimpleMomentumHarness:
 
 
 class ConvictionHarness:
-    """Matches apply_institutional_harness() from your latest script —
-    a LIGHTER institutional harness than GPTInstitutionalRiskHarness:
-    conviction overlay (momentum/trend composite score) -> portfolio
-    vol-targeting -> market-breadth multiplier -> cash fill. Deliberately
-    has NO per-asset trailing stop and NO portfolio drawdown guard
-    (GPTInstitutionalRiskHarness has both of those; this one doesn't —
-    those two steps were dropped in this version of your script).
+    """Exact port of apply_institutional_harness() from yesharnessgpt.py:
+    conviction overlay (momentum/trend score + cross-sectional rank tilt)
+    -> portfolio vol-targeting -> market-breadth multiplier -> cash fill.
+    No per-asset trailing stop and no portfolio drawdown guard (those live
+    in GPTInstitutionalRiskHarness, not here).
+
+    Differences from GPTInstitutionalRiskHarness:
+      - momentum weights 0.20/0.30/0.50 (long-term biased) vs 0.50/0.30/0.20
+      - asymmetric score clip (-0.55, +0.80) vs symmetric (-0.5, +0.5)
+      - cross-sectional rank tilt (28% spread, top→bottom) — not in GPT harness
+      - higher vol ceiling (0.25 / scale-to-0.22) vs (0.215 / scale-to-0.18)
+      - more bullish breadth multipliers (1.15, 1.07, 1.00, 0.60, 0.30 at
+        70%/55%/40%/20%) vs (1.0, 0.80, 0.50, 0.25 at 60%/40%/20%)
     """
     DEFAULT_PARAMS = {
-        "target_vol": 0.18,              # vol-targeting scales exposure down toward this when max_vol is breached
-        "max_vol": 0.215,                # portfolio vol above which scaling kicks in
-        "breadth_min_multiplier": 0.25,  # exposure floor when <20% of the universe is above its 200d SMA
+        "target_vol": 0.22,              # vol-targeting scales exposure down toward this when max_vol is breached
+        "max_vol": 0.25,                 # portfolio vol above which scaling kicks in
+        "breadth_min_multiplier": 0.30,  # exposure floor when <20% of the universe is above its 200d SMA
     }
     PARAM_BOUNDS = {
         "target_vol": (0.08, 0.30),
@@ -388,21 +394,35 @@ class ConvictionHarness:
         u = self.universe
         adjusted = {a: float(raw_allocs.get(a, 0.0)) for a in u.anon_universe}
 
+        # Step 1: Per-asset conviction scoring (long-term momentum biased).
+        # Scores computed for ALL assets so the rank tilt below uses a complete
+        # ordering — zero-weight assets stay at zero after the tilt regardless.
+        scores = {}
         for asset in u.anon_universe:
-            if adjusted[asset] <= 0:
-                continue
             closes = u.data_cache[asset].loc[:current_date]["Close"]
             cp = float(closes.iloc[-1])
-            m20 = cp / float(closes.iloc[-20]) - 1.0 if len(closes) >= 20 else 0.0
-            m60 = cp / float(closes.iloc[-60]) - 1.0 if len(closes) >= 60 else 0.0
-            m120 = cp / float(closes.iloc[-120]) - 1.0 if len(closes) >= 120 else 0.0
-            composite = 0.5 * m20 + 0.3 * m60 + 0.2 * m120
-            sma50 = float(closes.tail(50).mean()) if len(closes) >= 50 else cp
+            m20  = cp / float(closes.iloc[-20])  - 1.0 if len(closes) >= 21  else 0.0
+            m60  = cp / float(closes.iloc[-60])  - 1.0 if len(closes) >= 61  else 0.0
+            m120 = cp / float(closes.iloc[-120]) - 1.0 if len(closes) >= 121 else 0.0
+            composite = 0.20 * m20 + 0.30 * m60 + 0.50 * m120
+            sma50  = float(closes.tail(50).mean())  if len(closes) >= 50  else cp
             sma200 = float(closes.tail(200).mean()) if len(closes) >= 200 else cp
-            trend = (cp / sma50 - 1.0) + (sma50 / sma200 - 1.0)
-            score = float(np.clip(0.6 * composite + 0.4 * trend, -0.5, 0.5))
-            adjusted[asset] *= (1.0 + score)
+            trend = (cp / max(sma50, 1e-9) - 1.0) + (sma50 / max(sma200, 1e-9) - 1.0)
+            score = float(np.clip(0.6 * composite + 0.4 * trend, -0.55, 0.80))
+            scores[asset] = score
+            if adjusted[asset] > 0:
+                adjusted[asset] *= (1.0 + score)
 
+        # Step 2: Cross-sectional rank tilt — redistribute weight from
+        # low-momentum to high-momentum assets using a linear rank gradient.
+        ranked = sorted(u.anon_universe, key=lambda a: scores.get(a, 0.0), reverse=True)
+        n = len(ranked)
+        for i, asset in enumerate(ranked):
+            rank_pct = i / max(n - 1, 1)          # 0.0 = best, 1.0 = worst
+            tilt = 1.0 + 0.28 * (0.5 - rank_pct)  # 1.14 for top, 0.86 for bottom
+            adjusted[asset] = max(0.0, adjusted[asset] * tilt)
+
+        # Step 3: Portfolio vol targeting.
         vec = np.array([adjusted[a] for a in u.anon_universe], dtype=float)
         if vec.sum() > 0:
             returns = {a: u.data_cache[a].loc[:current_date]["Close"].pct_change().dropna() for a in u.anon_universe}
@@ -412,6 +432,7 @@ class ConvictionHarness:
                 vec = vec * (self.params["target_vol"] / vol)
             adjusted = {a: float(vec[i]) for i, a in enumerate(u.anon_universe)}
 
+        # Step 4: Breadth regime overlay — bidirectional.
         above_200 = 0
         for asset in u.anon_universe:
             closes = u.data_cache[asset].loc[:current_date]["Close"]
@@ -420,9 +441,10 @@ class ConvictionHarness:
             above_200 += int(cp >= sma200)
         ratio = above_200 / len(u.anon_universe)
         multiplier = (
-            1.0 if ratio >= 0.60 else
-            0.80 if ratio >= 0.40 else
-            0.50 if ratio >= 0.20 else
+            1.15 if ratio >= 0.70 else
+            1.07 if ratio >= 0.55 else
+            1.00 if ratio >= 0.40 else
+            0.60 if ratio >= 0.20 else
             self.params["breadth_min_multiplier"]
         )
         adjusted = {a: v * multiplier for a, v in adjusted.items()}
@@ -432,8 +454,5 @@ class ConvictionHarness:
         clean = {k: max(0.0, v) for k, v in combined.items()}
         total = sum(clean.values())
         if total <= 0:
-            # exact match to normalize_allocations() in your script: an all-zero
-            # result (e.g. every asset stopped out) falls back to 100% cash,
-            # not an all-zero allocation that sums to nothing.
             return {a: 0.0 for a in u.anon_universe} | {"CASH": 100.0}
         return {k: round(v / total * 100.0, 6) for k, v in clean.items()}

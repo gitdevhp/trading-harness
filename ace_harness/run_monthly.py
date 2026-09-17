@@ -61,7 +61,7 @@ def build_universe(tickers, start, end):
 def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_000.0,
                 rebalance_days=20, max_rounds=3, use_risk_harness=True, risk_harness_type="conviction",
                 adaptive_risk=True, include_screener_tool=True, fallback_mode="equal_weight",
-                truncate_context=False, max_tokens=300):
+                truncate_context=False, max_tokens=800):
     universe = build_universe(tickers, start, end)
     solver = Solver(universe, include_screener_tool=include_screener_tool, fallback_mode=fallback_mode,
                      max_tokens=max_tokens, truncate_context=truncate_context, prompt_style="monthly")
@@ -175,8 +175,8 @@ def main():
     parser.add_argument("--truncate_context", action="store_true",
                          help="resend only [system, user, last_2_messages] each turn instead of full history "
                               "(off by default, matching your latest script, which sends full history)")
-    parser.add_argument("--max_tokens", type=int, default=600,
-                         help="per-turn output budget for the Solver (increased from 300 to give Solver room to reason)")
+    parser.add_argument("--max_tokens", type=int, default=800,
+                         help="per-turn output budget for the Solver (matches yesharnessgpt.py's max_tokens=800)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
