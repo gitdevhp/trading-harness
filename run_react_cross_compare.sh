@@ -31,13 +31,15 @@ set -euo pipefail
 # BASIC SETUP
 # ============================================================
 
-mkdir -p log results
+mkdir -p log
 
 module load gcc/11.3.0
 module load miniforge
 
 cd /users/2/cai00317/trading-harness/ReAct
 source venv/bin/activate
+
+mkdir -p results
 
 export HF_HOME="$HOME/hf_cache"
 export VLLM_USE_FLASHINFER_SAMPLER=0
