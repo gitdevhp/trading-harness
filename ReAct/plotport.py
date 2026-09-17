@@ -12,6 +12,12 @@ FEE_RATE = 0.0015
 TRADING_DAYS_PER_YEAR = 252.0
 SUPPORTED_PLOT_EXTENSIONS = {".png", ".pdf", ".svg", ".jpg", ".jpeg", ".eps", ".ps", ".tif", ".tiff", ".webp", ".bmp", ".gif"}
 
+try:
+    from scipy.optimize import minimize as _sp_minimize
+    _HAS_SCIPY = True
+except ImportError:
+    _HAS_SCIPY = False
+
 
 def resolve_output_plot_path(path: str) -> str:
     if not path:
@@ -213,6 +219,213 @@ def risk_parity_curve(price_df: pd.DataFrame, initial_capital: float, lookback: 
     return pd.Series(out, index=prices.index, name="Risk Parity")
 
 
+def sixty_forty_curve(price_df: pd.DataFrame, initial_capital: float, bond_return_annual: float = 0.045) -> pd.Series:
+    """60% equal-weight equity + 40% bond proxy (4.5% p.a. fixed). Monthly rebalance back to 60/40."""
+    prices = price_df.dropna(how="any").copy()
+    if prices.empty:
+        raise ValueError("No common dates for 60/40 benchmark.")
+    dates = list(prices.index)
+    rebalance_dates = monthly_rebalance_dates(prices.index)
+    n = len(prices.columns)
+    bond_daily = (1.0 + bond_return_annual) ** (1.0 / 252.0) - 1.0
+
+    # Unified weight vector: [stock_0..stock_{n-1}, bond]
+    weights = np.append(np.full(n, 0.60 / n), 0.40)
+    value = float(initial_capital) * (1.0 - FEE_RATE * 0.60)  # initial equity-leg establishment fee
+    out = [value]
+
+    for i in range(1, len(dates)):
+        px = prices.iloc[i].values.astype(float)
+        prev = prices.iloc[i - 1].values.astype(float)
+        r_all = np.append(px / prev - 1.0, bond_daily)
+        value *= 1.0 + float(np.dot(weights, r_all))
+        drifted = weights * (1.0 + r_all)
+        total = float(drifted.sum())
+        if total > 0:
+            weights = drifted / total
+
+        if dates[i] in rebalance_dates:
+            target = np.append(np.full(n, 0.60 / n), 0.40)
+            turnover = float(np.abs(target - weights).sum())
+            value *= 1.0 - FEE_RATE * turnover
+            weights = target
+
+        out.append(value)
+
+    return pd.Series(out, index=prices.index, name="60/40")
+
+
+def min_variance_curve(price_df: pd.DataFrame, initial_capital: float, lookback: int = 126) -> pd.Series:
+    """Long-only minimum-variance portfolio, rebalanced monthly."""
+    if not _HAS_SCIPY:
+        raise ImportError("scipy is required for Min-Variance baseline.")
+    prices = price_df.dropna(how="any").copy()
+    returns = prices.pct_change()
+    dates = list(prices.index)
+    rebalance_dates = monthly_rebalance_dates(prices.index)
+    n = len(prices.columns)
+    weights = np.ones(n) / n
+    value = float(initial_capital) * (1.0 - FEE_RATE)
+    out = [value]
+
+    for i in range(1, len(dates)):
+        px = prices.iloc[i].values.astype(float)
+        prev = prices.iloc[i - 1].values.astype(float)
+        r = px / prev - 1.0
+        value *= 1.0 + float(np.dot(weights, r))
+        drifted = weights * (1.0 + r)
+        denom = float(drifted.sum())
+        if denom > 0:
+            weights = drifted / denom
+
+        if dates[i] in rebalance_dates:
+            window = returns.iloc[max(0, i - lookback):i]
+            cov = window.cov().values + np.eye(n) * 1e-8
+            constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+            bounds = [(0.0, 1.0)] * n
+            res = _sp_minimize(lambda w: float(w @ cov @ w), weights.copy(),
+                               method="SLSQP", bounds=bounds, constraints=constraints,
+                               options={"ftol": 1e-9, "maxiter": 500})
+            target = weights
+            if res.success and np.all(np.isfinite(res.x)) and res.x.sum() > 0:
+                target = np.clip(res.x, 0.0, 1.0)
+                target /= target.sum()
+            turnover = float(np.abs(target - weights).sum())
+            value *= 1.0 - FEE_RATE * turnover
+            weights = target
+
+        out.append(value)
+
+    return pd.Series(out, index=prices.index, name="Min-Variance")
+
+
+def cov_risk_parity_curve(price_df: pd.DataFrame, initial_capital: float, lookback: int = 126) -> pd.Series:
+    """Equal Risk Contribution using full covariance matrix, rebalanced monthly."""
+    if not _HAS_SCIPY:
+        raise ImportError("scipy is required for Cov-Risk-Parity baseline.")
+    prices = price_df.dropna(how="any").copy()
+    returns = prices.pct_change()
+    dates = list(prices.index)
+    rebalance_dates = monthly_rebalance_dates(prices.index)
+    n = len(prices.columns)
+    weights = np.ones(n) / n
+    value = float(initial_capital) * (1.0 - FEE_RATE)
+    out = [value]
+
+    def _erc(w, cov):
+        pv = float(w @ cov @ w)
+        if pv <= 1e-16:
+            return 1e10
+        rc = w * (cov @ w) / pv
+        return float(np.sum((rc - 1.0 / len(w)) ** 2))
+
+    for i in range(1, len(dates)):
+        px = prices.iloc[i].values.astype(float)
+        prev = prices.iloc[i - 1].values.astype(float)
+        r = px / prev - 1.0
+        value *= 1.0 + float(np.dot(weights, r))
+        drifted = weights * (1.0 + r)
+        denom = float(drifted.sum())
+        if denom > 0:
+            weights = drifted / denom
+
+        if dates[i] in rebalance_dates:
+            window = returns.iloc[max(0, i - lookback):i]
+            cov = window.cov().values + np.eye(n) * 1e-8
+            constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+            bounds = [(1e-4, 1.0)] * n
+            res = _sp_minimize(lambda w: _erc(w, cov), np.ones(n) / n,
+                               method="SLSQP", bounds=bounds, constraints=constraints,
+                               options={"ftol": 1e-10, "maxiter": 1000})
+            target = weights
+            if res.success and np.all(np.isfinite(res.x)) and res.x.sum() > 0:
+                target = np.clip(res.x, 0.0, 1.0)
+                target /= target.sum()
+            turnover = float(np.abs(target - weights).sum())
+            value *= 1.0 - FEE_RATE * turnover
+            weights = target
+
+        out.append(value)
+
+    return pd.Series(out, index=prices.index, name="Cov-Risk-Parity")
+
+
+def black_litterman_curve(price_df: pd.DataFrame, initial_capital: float,
+                          lookback: int = 126, tau: float = 0.025,
+                          risk_aversion: float = 2.5) -> pd.Series:
+    """Black-Litterman with equal-weight equilibrium prior and 1-month momentum views.
+    Portfolio optimised for max Sharpe on BL posterior, long-only, 30% per-asset cap."""
+    if not _HAS_SCIPY:
+        raise ImportError("scipy is required for Black-Litterman baseline.")
+    prices = price_df.dropna(how="any").copy()
+    returns = prices.pct_change()
+    dates = list(prices.index)
+    rebalance_dates = monthly_rebalance_dates(prices.index)
+    n = len(prices.columns)
+    weights = np.ones(n) / n
+    value = float(initial_capital) * (1.0 - FEE_RATE)
+    out = [value]
+
+    for i in range(1, len(dates)):
+        px = prices.iloc[i].values.astype(float)
+        prev = prices.iloc[i - 1].values.astype(float)
+        r = px / prev - 1.0
+        value *= 1.0 + float(np.dot(weights, r))
+        drifted = weights * (1.0 + r)
+        denom = float(drifted.sum())
+        if denom > 0:
+            weights = drifted / denom
+
+        if dates[i] in rebalance_dates:
+            window = returns.iloc[max(0, i - lookback):i]
+            cov = window.cov().values + np.eye(n) * 1e-8
+
+            # Equilibrium implied returns (equal-weight market portfolio)
+            Pi = risk_aversion * (cov @ np.ones(n) / n)
+
+            # Absolute momentum views: Q_j = 21-day realised return for asset j
+            Q = np.zeros(n)
+            for j in range(n):
+                col = window.iloc[:, j].dropna()
+                if len(col) >= 21:
+                    Q[j] = float((col.iloc[-21:] + 1).prod() - 1)
+
+            # BL update: P = I (absolute views), Omega = tau * diag(Sigma)
+            P = np.eye(n)
+            omega_diag = tau * np.diag(cov)
+            target = weights
+            try:
+                tau_cov_inv = np.linalg.inv(tau * cov)
+                omega_inv = np.diag(1.0 / np.maximum(omega_diag, 1e-12))
+                M = np.linalg.inv(tau_cov_inv + P.T @ omega_inv @ P)
+                mu_bl = M @ (tau_cov_inv @ Pi + P.T @ omega_inv @ Q)
+                cov_bl = cov + M
+
+                def neg_sharpe(w):
+                    ret = float(w @ mu_bl)
+                    vol = float(np.sqrt(max(float(w @ cov_bl @ w), 1e-12)))
+                    return -ret / vol
+
+                constraints = [{"type": "eq", "fun": lambda w: w.sum() - 1.0}]
+                bounds = [(0.0, 0.30)] * n
+                res = _sp_minimize(neg_sharpe, np.ones(n) / n, method="SLSQP",
+                                   bounds=bounds, constraints=constraints,
+                                   options={"ftol": 1e-9, "maxiter": 500})
+                if res.success and np.all(np.isfinite(res.x)) and res.x.sum() > 0:
+                    target = np.clip(res.x, 0.0, 1.0)
+                    target /= target.sum()
+            except np.linalg.LinAlgError:
+                pass
+
+            turnover = float(np.abs(target - weights).sum())
+            value *= 1.0 - FEE_RATE * turnover
+            weights = target
+
+        out.append(value)
+
+    return pd.Series(out, index=prices.index, name="Black-Litterman")
+
+
 def normalize(s: pd.Series) -> pd.Series:
     s = pd.Series(s).copy()
     s.index = pd.to_datetime(s.index)
@@ -303,37 +516,51 @@ def generate_evaluation_report(harness_file="react_harness_results_compare.json"
     price_df = extract_prices(primary_records)
     initial = float(systems["ReAct + Risk Harness"].iloc[0]) if "ReAct + Risk Harness" in systems else float(next(iter(systems.values())).iloc[0])
 
-    try:
-        systems["Equal-Weight (1/n)"] = equal_weight_curve(price_df, initial)
-    except Exception as exc:
-        print(f"WARNING: equal-weight benchmark unavailable: {exc}")
-    try:
-        systems["Risk Parity"] = risk_parity_curve(price_df, initial)
-    except Exception as exc:
-        print(f"WARNING: risk-parity benchmark unavailable: {exc}")
+    baselines = [
+        ("Equal-Weight (1/n)", lambda: equal_weight_curve(price_df, initial)),
+        ("Risk Parity",        lambda: risk_parity_curve(price_df, initial)),
+        ("60/40",              lambda: sixty_forty_curve(price_df, initial)),
+        ("Min-Variance",       lambda: min_variance_curve(price_df, initial)),
+        ("Cov-Risk-Parity",    lambda: cov_risk_parity_curve(price_df, initial)),
+        ("Black-Litterman",    lambda: black_litterman_curve(price_df, initial)),
+    ]
+    for bname, bfn in baselines:
+        try:
+            systems[bname] = bfn()
+        except Exception as exc:
+            print(f"WARNING: {bname} baseline unavailable: {exc}")
 
     systems = align_systems(systems)
     benchmark = systems.get("Equal-Weight (1/n)", next(iter(systems.values())))
     all_metrics = {name: metrics(series, benchmark) for name, series in systems.items()}
 
-    print("\n" + "=" * 170)
+    col_w = 16
+    n_cols = len(all_metrics)
+    table_w = 28 + (col_w + 3) * n_cols
+    print("\n" + "=" * table_w)
     print("PORTBENCH / REACT SYSTEM COMPARISON")
-    print("=" * 170)
+    print("=" * table_w)
     print("Model JSON costs: already embedded in portfolio_value; no second cost is applied.")
     print("Quant baselines: 15 bps turnover cost applied independently.")
-    print("\n" + f"{'Metric':<28} | " + " | ".join(f"{n[:18]:<18}" for n in all_metrics))
-    print("-" * 170)
+    print("\n" + f"{'Metric':<28} | " + " | ".join(f"{nm[:col_w]:<{col_w}}" for nm in all_metrics))
+    print("-" * table_w)
     for key in ["Total Return (%)", "CAGR (%)", "Ann. Volatility (%)", "Max Drawdown (%)", "Sharpe Ratio", "Sortino Ratio", "Calmar Ratio", "Beta (Systematic Risk)", "Alpha (% p.a.)"]:
-        print(f"{key:<28} | " + " | ".join(f"{all_metrics[n][key]:<18}" for n in all_metrics))
-    print("=" * 170 + "\n")
+        print(f"{key:<28} | " + " | ".join(f"{all_metrics[nm][key]:<{col_w}}" for nm in all_metrics))
+    print("=" * table_w + "\n")
 
     styles = {
-        "ReAct + Risk Harness": dict(color="#1f77b4", linestyle="-", linewidth=2.5),
-        "ReAct + GPT Harness": dict(color="#9467bd", linestyle="-", linewidth=2.3),
-        "Vanilla ReAct": dict(color="#2ca02c", linestyle="--", linewidth=1.7),
-        "Raw Direct Qwen": dict(color="#d62728", linestyle="-.", linewidth=1.7),
-        "Equal-Weight (1/n)": dict(color="#ff7f0e", linestyle=":", linewidth=1.8),
-        "Risk Parity": dict(color="#17becf", linestyle="-", linewidth=1.5),
+        # LLM systems — solid, bold
+        "ReAct + Risk Harness": dict(color="#1f77b4", linestyle="-",  linewidth=2.5),
+        "ReAct + GPT Harness":  dict(color="#9467bd", linestyle="-",  linewidth=2.3),
+        "Vanilla ReAct":        dict(color="#2ca02c", linestyle="--", linewidth=1.7),
+        "Raw Direct Qwen":      dict(color="#d62728", linestyle="-.", linewidth=1.7),
+        # Quant baselines — thinner, muted
+        "Equal-Weight (1/n)":   dict(color="#ff7f0e", linestyle=":",  linewidth=1.8),
+        "Risk Parity":          dict(color="#17becf", linestyle="--", linewidth=1.5),
+        "60/40":                dict(color="#8c564b", linestyle="-.", linewidth=1.5),
+        "Min-Variance":         dict(color="#e377c2", linestyle=":",  linewidth=1.5),
+        "Cov-Risk-Parity":      dict(color="#7f7f7f", linestyle="--", linewidth=1.5),
+        "Black-Litterman":      dict(color="#bcbd22", linestyle="-.", linewidth=1.5),
     }
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 10), sharex=True, gridspec_kw={"height_ratios": [2.5, 1]})
