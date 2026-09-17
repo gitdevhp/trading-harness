@@ -27,4 +27,10 @@ def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
         model=model, messages=messages, temperature=temperature,
         max_tokens=max_tokens, stop=stop,
     )
-    return response.choices[0].message.content.strip()
+    msg = response.choices[0].message
+    # Qwen3.6 with --reasoning-parser qwen3 may place the response in the
+    # reasoning field and leave content=None for some output modes.
+    text = (msg.content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning", None) or "").strip()
+    return text
