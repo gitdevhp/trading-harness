@@ -484,7 +484,7 @@ def metrics(series: pd.Series, benchmark: Optional[pd.Series] = None) -> dict:
 
 def generate_evaluation_report(harness_file="react_harness_results_compare.json", gpt_harness_file="react_gpt_harness_results_compare.json", no_harness_file="react_no_harness_results_compare.json", raw_llm_file="qwen_raw_results_compare.json", output_plot="results_compare.png"):
     requested = [
-        ("ReAct + Risk Harness", harness_file, True),
+        ("ReAct + Risk Harness", harness_file, False),
         ("ReAct + GPT Harness", gpt_harness_file, False),
         ("Vanilla ReAct", no_harness_file, False),
         ("Raw Direct Qwen", raw_llm_file, False),
@@ -494,24 +494,25 @@ def generate_evaluation_report(harness_file="react_harness_results_compare.json"
 
     for name, path, required in requested:
         if not path or not os.path.exists(path):
-            if required:
-                raise FileNotFoundError(f"Primary file '{path}' not found.")
             print(f"WARNING: optional file '{path}' not found; skipping {name}.")
             continue
         try:
             series, records = load_json_series(path)
             systems[name] = series
-            if required:
+            if primary_records is None:
                 primary_records = records
         except Exception as exc:
-            if required:
-                raise
             print(f"WARNING: could not load {name} from '{path}': {exc}")
 
     if not systems:
         raise ValueError("No usable model result JSON files were found.")
     if primary_records is None:
-        primary_records = load_json_records(harness_file)
+        for _, path, _ in requested:
+            if path and os.path.exists(path):
+                primary_records = load_json_records(path)
+                break
+    if primary_records is None:
+        raise ValueError("No result files found to extract prices from.")
 
     price_df = extract_prices(primary_records)
     initial = float(systems["ReAct + Risk Harness"].iloc[0]) if "ReAct + Risk Harness" in systems else float(next(iter(systems.values())).iloc[0])
