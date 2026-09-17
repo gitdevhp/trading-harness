@@ -80,6 +80,32 @@ class ExperienceMemory:
             for bid in ids[max_bullets_per_section:]:
                 self.bullets.pop(bid, None)
 
+    def seed_with_principles(self):
+        """Pre-populate memory with foundational momentum-signal principles so
+        memory-based systems start with actionable heuristics rather than an empty
+        playbook. Only seeds if memory is currently empty, so a loaded playbook
+        is never clobbered."""
+        if self.bullets:
+            return
+        seeds = [
+            ("CONVICTION SIGNALS",
+             "When 6M-Mom > 15% AND price is above both 50d-SMA and 200d-SMA, strong trending regime justifies a position >= 12%"),
+            ("CONVICTION SIGNALS",
+             "When 1M-Mom and 6M-Mom are both positive and price is above 200d-SMA, momentum is confirmed — sizing up to 15% is warranted"),
+            ("RISK LESSONS",
+             "When price is below 200d-SMA AND 6M-Mom < -5%, regime is bearish — cap that asset at 5% or less"),
+            ("RISK LESSONS",
+             "When 1M-Vol > 35% on an asset already allocated >= 15%, reduce to under 10% to control tail risk"),
+            ("STRATEGIES & INSIGHTS",
+             "Monthly 15bps fee means turnover above 60% costs over 9bps net drag — avoid churning positions that changed < 5% in fundamentals"),
+            ("MARKET REGIME NOTES",
+             "When the majority of assets show price below 50d-SMA, broad market weakness — raise CASH above 20%"),
+            ("MISTAKES TO AVOID",
+             "Allocating > 20% to any asset whose 6M-Mom is negative and price is below 50d-SMA has historically produced losses"),
+        ]
+        for section, content in seeds:
+            self.add_bullet(section, content)
+
     def apply_delta_ops(self, ops):
         """ops: list of dicts, one of
             {"op": "add", "section": str, "content": str}
