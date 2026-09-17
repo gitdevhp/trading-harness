@@ -72,6 +72,9 @@ ANONYMOUS_MAP = {}
 REVERSE_MAP = {}
 ANONYMOUS_UNIVERSE = []
 GLOBAL_DATA_CACHE = {}
+PRICE_INDEX_BASE = {}
+DISPLAY_MAP = {}
+DISPLAY_REVERSE = {}
 
 
 # ============================================================
@@ -84,6 +87,9 @@ def setup_universe(tickers):
     global REVERSE_MAP
     global ANONYMOUS_UNIVERSE
     global GLOBAL_DATA_CACHE
+    global PRICE_INDEX_BASE
+    global DISPLAY_MAP
+    global DISPLAY_REVERSE
 
     RAW_UNIVERSE = [
         str(t).upper()
