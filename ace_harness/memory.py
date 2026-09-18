@@ -135,19 +135,24 @@ class ExperienceMemory:
         entries.sort(key=lambda kv: (kv[1]["helpful"] - kv[1]["harmful"], kv[1]["helpful"] + kv[1]["harmful"]), reverse=True)
         return entries
 
-    def format_for_prompt(self, max_bullets_per_section: int = 8) -> str:
-        """Ranked view for the Solver/Debater. Soft-hides bullets with a
-        clearly negative, evidenced track record (net <= -1 with >= 2
-        votes) — they stay on disk and in format_all_for_review() until
-        prune() physically deletes them, but they're not shown as if they
-        were good advice in the meantime."""
+    def format_for_prompt(self, max_bullets_per_section: int = 5) -> str:
+        """Ranked view for the Solver/Debater. Only shows bullets that have
+        been explicitly reinforced at least once (helpful >= 1) — new,
+        untested entries are visible to the Consolidator via
+        format_all_for_review() but not forwarded to the Solver as advice
+        until at least one period has confirmed them. Also soft-hides
+        bullets with a clearly negative track record (net <= -1 with >= 2
+        votes) until prune() physically deletes them."""
         if not self.bullets:
             return "(Experience memory is empty — no prior lessons yet.)"
         lines = []
         for section in self.sections:
             entries = self._sorted_entries(section)
-            visible = [(bid, b) for bid, b in entries
-                       if not ((b["helpful"] - b["harmful"]) <= -1 and (b["helpful"] + b["harmful"]) >= 2)]
+            visible = [
+                (bid, b) for bid, b in entries
+                if b["helpful"] >= 1
+                and not ((b["helpful"] - b["harmful"]) <= -1 and (b["helpful"] + b["harmful"]) >= 2)
+            ]
             if not visible:
                 continue
             lines.append(f"## {section}")
