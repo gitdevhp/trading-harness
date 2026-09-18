@@ -359,7 +359,7 @@ Portfolio status:
 Proposed target allocations: {proposed_allocations}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=600)
+                      temperature=0.4, max_tokens=600)
         parsed = _extract_json(reply) or {}
         direction = parsed.get("direction", "well_calibrated")
         if direction not in ("increase_conviction", "decrease_risk", "well_calibrated"):
@@ -405,7 +405,7 @@ Respond ONLY with JSON, no other text:
 Realized per-asset returns to {next_date} (%): {realized_return_pct}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=550)
+                      temperature=0.3, max_tokens=550)
         parsed = _extract_json(reply) or {}
         return {
             "lessons": _normalize_lessons(parsed.get("lessons")),
