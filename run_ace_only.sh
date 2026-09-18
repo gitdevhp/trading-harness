@@ -223,11 +223,6 @@ for MODEL_VERSION in qwen25 qwen36; do
             --max-model-len 16384
             --gpu-memory-utilization 0.90
             --enable-chunked-prefill
-            --language-model-only
-            --reasoning-parser qwen3
-            --enable-auto-tool-choice
-            --tool-call-parser qwen3_coder
-            --generation-config vllm
         )
     fi
 

@@ -28,11 +28,18 @@ def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
         max_tokens=max_tokens, stop=stop,
     )
     msg = response.choices[0].message
-    # vLLM with --reasoning-parser qwen3 may leave content=None and put the
-    # response in reasoning_content (vLLM ≥0.6) or reasoning (older builds).
+    # Primary: content field.
     text = (msg.content or "").strip()
+    # Fallback for vLLM builds that use --reasoning-parser and put the actual
+    # response in reasoning_content (vLLM ≥0.6) or reasoning (older builds).
     if not text:
         text = (getattr(msg, "reasoning_content", None) or "").strip()
     if not text:
         text = (getattr(msg, "reasoning", None) or "").strip()
+    # Qwen3 models emit <think>...</think> blocks when reasoning-parser is NOT
+    # used (tokens appear inline in content). Strip the thinking block and keep
+    # only the response that follows it.
+    if "<think>" in text:
+        import re as _re
+        text = _re.sub(r"<think>.*?</think>", "", text, flags=_re.DOTALL).strip()
     return text
