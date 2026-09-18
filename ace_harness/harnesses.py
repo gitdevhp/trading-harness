@@ -39,7 +39,6 @@ come from that one addition and nothing else:
                      persists for the entire backtest, never cleared.
 """
 from ace_harness.memory import ExperienceMemory
-from ace_harness.reward_model import compute_portfolio_return
 
 
 def _apply_bullet_checks(memory, bullet_checks):
@@ -94,15 +93,12 @@ def make_intra_task(universe, solver, debater, max_rounds: int = 3):
 
 
 def make_inter_task(universe, solver, debater, consolidator, memory, memory_path,
-                     risk_harness=None, risk_tuner=None, risk_params_path=None,
-                     reward_model=None, reward_model_path=None):
+                     risk_harness=None, risk_tuner=None, risk_params_path=None):
     """risk_harness/risk_tuner are optional. If risk_harness is given, its
     output (not the Solver's raw allocation) is what gets returned/executed.
     If risk_tuner is ALSO given, the same post-task reflection that updates
     the text playbook also proposes bounded parameter deltas for the risk
     harness — i.e. memory tunes the risk layer, not just the Solver prompt.
-    reward_model is optional: when warm (>=4 observations) it scores the
-    Solver's proposal and gives Solver one revision pass with that signal.
     """
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         past_dates = sorted(decision_log.keys())
@@ -122,12 +118,6 @@ def make_inter_task(universe, solver, debater, consolidator, memory, memory_path
             memory.apply_delta_ops(ops)
             memory.save(memory_path)
 
-            if reward_model is not None:
-                ret = compute_portfolio_return(prev["targets"], prev["close_prices"], realized_prices)
-                reward_model.update(prev["targets"], ret)
-                if reward_model_path:
-                    reward_model.save(reward_model_path)
-
             if risk_harness is not None and risk_tuner is not None:
                 deltas = risk_tuner.propose_adjustments(
                     risk_harness.get_params(), risk_harness.get_param_bounds(),
@@ -138,17 +128,9 @@ def make_inter_task(universe, solver, debater, consolidator, memory, memory_path
                     risk_harness.save_params(risk_params_path)
 
         playbook_text = memory.format_for_prompt()
-        _rp = risk_harness.get_params() if risk_harness else None
         raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                          playbook_text=playbook_text, risk_params=_rp)
-
-        if reward_model is not None:
-            reward_signal = reward_model.score(raw_alloc)
-            if reward_signal:
-                raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                   playbook_text=playbook_text, risk_params=_rp,
-                                                   reward_signal_text=reward_signal)
-
+                                          playbook_text=playbook_text,
+                                          risk_params=risk_harness.get_params() if risk_harness else None)
         meta = {"trace": trace, "playbook_snapshot": playbook_text}
 
         if risk_harness is not None:
@@ -286,8 +268,7 @@ def make_dual_session(universe, solver, debater, consolidator, max_rounds: int =
 
 
 def make_memory_only(universe, solver, debater, consolidator, memory, memory_path,
-                      risk_harness=None, risk_tuner=None, risk_params_path=None,
-                      reward_model=None, reward_model_path=None):
+                      risk_harness=None, risk_tuner=None, risk_params_path=None):
     """ABLATION CONTROL for dual_permanent: the exact same persistent
     memory, Consolidator, and (if given) adaptive risk-tuning — but with
     NO pre-execution Debater pressure-test/revision at all. The Solver
@@ -310,13 +291,11 @@ def make_memory_only(universe, solver, debater, consolidator, memory, memory_pat
     return make_inter_task(
         universe, solver, debater, consolidator, memory, memory_path,
         risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
-        reward_model=reward_model, reward_model_path=reward_model_path,
     )
 
 
 def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_path,
-                         risk_harness=None, risk_tuner=None, risk_params_path=None,
-                         reward_model=None, reward_model_path=None):
+                         risk_harness=None, risk_tuner=None, risk_params_path=None):
     """SYSTEM B — permanent-memory dual-timescale.
 
     Exactly the loop from the diagram: Solver proposes -> Debater reviews
@@ -327,9 +306,6 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
     object across the entire backtest — both the debate's own lessons and
     the post-task reflection on the PREVIOUS task's realized outcome feed
     the Consolidator, and nothing is ever cleared.
-    reward_model is optional: when warm, its signal is combined with the
-    Debater's feedback in the revision pass (or triggers a revision on its
-    own when the Debater accepts but the model has a prediction).
     """
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         # slow loop: reflect on the previous task's realized outcome first
@@ -349,12 +325,6 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
             # Save after slow-loop ops so reflection updates survive a fast-loop crash.
             memory.save(memory_path)
 
-            if reward_model is not None:
-                ret = compute_portfolio_return(prev["targets"], prev["close_prices"], realized_prices)
-                reward_model.update(prev["targets"], ret)
-                if reward_model_path:
-                    reward_model.save(reward_model_path)
-
             if risk_harness is not None and risk_tuner is not None:
                 deltas = risk_tuner.propose_adjustments(
                     risk_harness.get_params(), risk_harness.get_param_bounds(),
@@ -373,25 +343,109 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
 
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                    playbook_text=playbook_text, risk_params=_rp)
-        reward_signal = reward_model.score(first_alloc) if reward_model is not None else ""
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
                                             playbook_text=playbook_text, round_num=1)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
 
         all_lessons = list(review.get("lessons", []))
 
-        if review["verdict"] == "accept" and not reward_signal:
+        if review["verdict"] == "accept":
             final_alloc = first_alloc
         else:
-            # Combine Debater feedback and reward signal for the revision pass.
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                        playbook_text=playbook_text,
-                                                        feedback_text=review["feedback"] if review["verdict"] != "accept" else None,
-                                                        direction=review.get("direction") if review["verdict"] != "accept" else None,
-                                                        risk_params=_rp,
-                                                        reward_signal_text=reward_signal or None)
+                                                        playbook_text=playbook_text, feedback_text=review["feedback"],
+                                                        direction=review.get("direction"), risk_params=_rp)
             # Review the revised allocation so the Debater can check whether the
             # Solver actually addressed its concern, and extract any new lessons.
+            second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
+                                                       playbook_text=playbook_text, round_num=2)
+            all_lessons.extend(second_review.get("lessons", []))
+            rounds_log.append({"round": 2, "allocations": final_alloc, "review": second_review})
+
+        ops = consolidator.consolidate(memory, all_lessons, memory.sections)
+        memory.apply_delta_ops(ops)
+        memory.save(memory_path)
+
+        meta = {"rounds": rounds_log, "playbook_snapshot": playbook_text}
+        if risk_harness is not None:
+            harnessed = risk_harness.apply(final_alloc, current_date, portfolio_state["portfolio_value"])
+            meta["pre_harness_allocations"] = final_alloc
+            meta["risk_params"] = risk_harness.get_params()
+            return harnessed, meta
+
+        return final_alloc, meta
+    return decision_fn
+
+
+def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, memory_path,
+                               reward_model, risk_harness=None, risk_tuner=None, risk_params_path=None):
+    """dual_permanent + AdaReMo: identical flow to make_dual_permanent, with one
+    addition — after each period the AdaptiveRewardModel is updated with the
+    previous allocation and its realized weighted return, then its signal (a
+    Ridge-regression prediction of which asset weights correlated with better
+    returns historically) is appended to the Solver's context as a weak prior.
+    No lookahead: the model only sees data from periods already completed.
+    """
+    def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
+        past_dates = sorted(decision_log.keys())
+        if past_dates:
+            prev_date = past_dates[-1]
+            prev = decision_log[prev_date]
+            decision_playbook = (prev.get("meta") or {}).get("playbook_snapshot") or memory.format_for_prompt()
+            realized_prices = universe.close_prices(current_date)
+            reflection = debater.post_task_reflect(
+                prev_date, current_date, prev["targets"], prev["close_prices"], realized_prices,
+                playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
+            )
+            _apply_bullet_checks(memory, reflection.get("bullet_checks"))
+            ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
+            memory.apply_delta_ops(ops)
+            memory.save(memory_path)
+
+            # Update AdaReMo: record previous allocation → realized weighted return
+            rr = reflection["realized_return_pct"]
+            if rr:
+                prev_alloc = prev["targets"]
+                weighted_return = sum(
+                    (prev_alloc.get(a, 0.0) / 100.0) * ret for a, ret in rr.items()
+                )
+                reward_model.record(prev_alloc, float(weighted_return))
+                reward_model.fit()
+
+            if risk_harness is not None and risk_tuner is not None:
+                deltas = risk_tuner.propose_adjustments(
+                    risk_harness.get_params(), risk_harness.get_param_bounds(),
+                    reflection["lessons"], reflection["realized_return_pct"],
+                )
+                risk_harness.update_params(deltas)
+                if risk_params_path:
+                    risk_harness.save_params(risk_params_path)
+
+        playbook_text = memory.format_for_prompt()
+        reward_signal = reward_model.signal_text()
+        combined_context = (
+            f"{playbook_text}\n\n{reward_signal}" if playbook_text and reward_signal
+            else playbook_text or reward_signal or None
+        )
+
+        screener = universe.get_market_screener(current_date)
+        status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
+                        f"Cash: {portfolio_state['cash_pct']:.1f}%")
+        _rp = risk_harness.get_params() if risk_harness else None
+
+        first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
+                                                   playbook_text=combined_context, risk_params=_rp)
+        review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
+                                            playbook_text=playbook_text, round_num=1)
+        rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
+        all_lessons = list(review.get("lessons", []))
+
+        if review["verdict"] == "accept":
+            final_alloc = first_alloc
+        else:
+            final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
+                                                        playbook_text=combined_context, feedback_text=review["feedback"],
+                                                        direction=review.get("direction"), risk_params=_rp)
             second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
                                                        playbook_text=playbook_text, round_num=2)
             all_lessons.extend(second_review.get("lessons", []))

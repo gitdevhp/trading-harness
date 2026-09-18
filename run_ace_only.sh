@@ -25,7 +25,6 @@ set -euo pipefail
 # ============================================================
 ACE_RUN_TAG="ace_fixed"   # <-- change between ACE-only submissions
 REACT_RUN_TAG="2"         # <-- tag of the existing ReAct results to reuse
-USE_REWARD_MODEL=1        # 1 = enable AdaReMo signal (default), 0 = disable it
 
 
 # ============================================================
@@ -181,9 +180,8 @@ get_tickers() {
 echo "=========================================="
 echo "ACE-ONLY RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
-echo "Systems:    HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
-echo "AdaReMo:    $([ "$USE_REWARD_MODEL" = "1" ] && echo "ENABLED" || echo "disabled")"
-echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-FP8)"
+echo "Systems:    HARNESS+MEMORY+DEBATER (dual_permanent)  |  +AdaReMo"
+echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B, non-FP8)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
 echo "Capital:    \$${INITIAL_CAPITAL}  |  Fees: 15 bps  |  Rebalance: monthly"
@@ -215,7 +213,7 @@ for MODEL_VERSION in qwen25 qwen36; do
             --tool-call-parser hermes
         )
     else
-        MODEL="Qwen/Qwen3.6-35B-A3B-FP8"
+        MODEL="Qwen/Qwen3.6-35B-A3B"
         MODEL_TAG="36"
         VLLM_ARGS=(
             --model "$MODEL"
@@ -225,11 +223,6 @@ for MODEL_VERSION in qwen25 qwen36; do
             --max-model-len 16384
             --gpu-memory-utilization 0.90
             --enable-chunked-prefill
-            --language-model-only
-            --reasoning-parser qwen3
-            --enable-auto-tool-choice
-            --tool-call-parser qwen3_coder
-            --generation-config vllm
         )
     fi
 
@@ -260,20 +253,28 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         echo ""
-        echo "--- ACE: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
+        echo "--- ACE: HARNESS+MEMORY+DEBATER (dual_permanent) ---"
         cd "$ROOT_DIR"
-        REWARD_MODEL_FLAG=""
-        [ "$USE_REWARD_MODEL" != "1" ] && REWARD_MODEL_FLAG="--no_reward_model"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
             --end     "$END_DATE" \
-            --systems intra memory_only dual_permanent \
+            --systems dual_permanent \
             --output_dir "$ACE_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
-            --rebalance-days  "$REBALANCE_DAYS" \
-            $REWARD_MODEL_FLAG
+            --rebalance-days  "$REBALANCE_DAYS"
+
+        echo ""
+        echo "--- ACE+AdaReMo: HARNESS+MEMORY+DEBATER+REWARD_MODEL ---"
+        python -m ace_harness.run_monthly_adamo \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start   "$START_DATE" \
+            --end     "$END_DATE" \
+            --output_dir "$ACE_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --rebalance-days  "$REBALANCE_DAYS"
         cd "$REACT_DIR"
         echo "Done -> ${ACE_DIR}/"
 
