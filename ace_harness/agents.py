@@ -200,7 +200,7 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                           "allocations using only the provided assets and CASH.")
         return system_prompt, user_content, invalid_nudge
 
-    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None, risk_params=None):
+    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None, risk_params=None, reward_signal_text=None):
         u = self.universe
         tools = self._tools(current_date, portfolio_state)
         tools_list = "\n".join(f"- {name}[]" for name in tools)
@@ -218,6 +218,8 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                 f"  breadth_min_multiplier: when <20%% of assets are above their 200d SMA, equity exposure is floored at this fraction.\n"
                 f"Implication: proposals with very high concentration will be vol-scaled; align your conviction sizing to the harness's target_vol.\n"
             )
+        if reward_signal_text:
+            memory_block += f"\n{reward_signal_text}\n"
         if feedback_text:
             if direction == "increase_conviction":
                 label = "DEBATER ARGUES YOU ARE UNDERSIZING A STRONG SIGNAL — address before finalizing:"
@@ -359,7 +361,7 @@ Portfolio status:
 Proposed target allocations: {proposed_allocations}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.4, max_tokens=600)
+                      temperature=0.0, max_tokens=600)
         parsed = _extract_json(reply) or {}
         direction = parsed.get("direction", "well_calibrated")
         if direction not in ("increase_conviction", "decrease_risk", "well_calibrated"):
@@ -405,7 +407,7 @@ Respond ONLY with JSON, no other text:
 Realized per-asset returns to {next_date} (%): {realized_return_pct}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.3, max_tokens=550)
+                      temperature=0.0, max_tokens=550)
         parsed = _extract_json(reply) or {}
         return {
             "lessons": _normalize_lessons(parsed.get("lessons")),
