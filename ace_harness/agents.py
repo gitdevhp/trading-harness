@@ -200,7 +200,7 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                           "allocations using only the provided assets and CASH.")
         return system_prompt, user_content, invalid_nudge
 
-    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None, risk_params=None, reward_signal_text=None):
+    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None, risk_params=None):
         u = self.universe
         tools = self._tools(current_date, portfolio_state)
         tools_list = "\n".join(f"- {name}[]" for name in tools)
@@ -218,8 +218,6 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                 f"  breadth_min_multiplier: when <20%% of assets are above their 200d SMA, equity exposure is floored at this fraction.\n"
                 f"Implication: proposals with very high concentration will be vol-scaled; align your conviction sizing to the harness's target_vol.\n"
             )
-        if reward_signal_text:
-            memory_block += f"\n{reward_signal_text}\n"
         if feedback_text:
             if direction == "increase_conviction":
                 label = "DEBATER ARGUES YOU ARE UNDERSIZING A STRONG SIGNAL — address before finalizing:"

@@ -28,9 +28,11 @@ def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
         max_tokens=max_tokens, stop=stop,
     )
     msg = response.choices[0].message
-    # Qwen3.6 with --reasoning-parser qwen3 may place the response in the
-    # reasoning field and leave content=None for some output modes.
+    # vLLM with --reasoning-parser qwen3 may leave content=None and put the
+    # response in reasoning_content (vLLM ≥0.6) or reasoning (older builds).
     text = (msg.content or "").strip()
+    if not text:
+        text = (getattr(msg, "reasoning_content", None) or "").strip()
     if not text:
         text = (getattr(msg, "reasoning", None) or "").strip()
     return text
