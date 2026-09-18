@@ -200,7 +200,7 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
                           "allocations using only the provided assets and CASH.")
         return system_prompt, user_content, invalid_nudge
 
-    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None):
+    def decide(self, current_date, portfolio_state, rebalance_days, playbook_text=None, feedback_text=None, direction=None, risk_params=None):
         u = self.universe
         tools = self._tools(current_date, portfolio_state)
         tools_list = "\n".join(f"- {name}[]" for name in tools)
@@ -209,6 +209,15 @@ Action: Target_Allocations[{{"ASSET_A": 15, "ASSET_B": 15, ..., "CASH": 10}}]"""
             f"\n\nEXPERIENCE MEMORY (lessons from prior tasks — weigh higher helpful/harmful counts more):\n{playbook_text}\n"
             if playbook_text else ""
         )
+        if risk_params:
+            _rp = ", ".join(f"{k}={v}" for k, v in risk_params.items())
+            memory_block += (
+                f"\nRISK HARNESS PARAMETERS (applied after your proposal — calibrate your sizing to these):\n{_rp}\n"
+                f"  target_vol: if realized portfolio vol exceeds max_vol, your equity exposure is scaled down to target_vol.\n"
+                f"  stop_vol_multiplier: per-asset trailing stop = multiplier × 20d realized vol (floored at 10%, capped at 25%).\n"
+                f"  breadth_min_multiplier: when <20%% of assets are above their 200d SMA, equity exposure is floored at this fraction.\n"
+                f"Implication: proposals with very high concentration will be vol-scaled; align your conviction sizing to the harness's target_vol.\n"
+            )
         if feedback_text:
             if direction == "increase_conviction":
                 label = "DEBATER ARGUES YOU ARE UNDERSIZING A STRONG SIGNAL — address before finalizing:"
