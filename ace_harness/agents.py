@@ -343,7 +343,6 @@ You must be willing to argue in EITHER direction, based only on what the screene
 You do NOT know future prices — never argue from hindsight, only from what's in the screener right now.
 IMPORTANT: A risk harness (volatility targeting, position caps, drawdown limits) is applied AFTER this proposal is finalized. It already handles generic risk guardrails. Your job is NOT to fine-tune position sizes out of general caution — it is to catch SIGNAL MISREADS: wrong direction on an asset, a missed strong signal that was priced out, or a large position with directly contradictory screener metrics. If the sizing looks reasonable given the signals, concede.
 If you argue "decrease_risk", you MUST cite the SPECIFIC screener metric and value that directly contradicts the proposed position (e.g. "6M-Mom is -8% yet allocated 20%"). Without a named, checkable metric that contradicts the sizing, verdict must be "accept".
-When in doubt, ACCEPT. Reserve "revise" ONLY for clear, named signal misreads — a specific screener metric that directly contradicts the proposed sizing. A proposal that is merely imperfect, slightly conservative, or could theoretically be improved is NOT grounds for revision; accept it and note the observation as a lesson instead.
 {memory_block}
 Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
 {_LESSON_QUALITY_BAR}
@@ -435,13 +434,13 @@ Sections available: {sections}
 You see the FULL existing playbook below, including bullets already marked harmful, and NEW candidate lessons, each with a confidence rating.
 
 Rules:
-- A "low" or "medium" confidence lesson may only REINFORCE, CONTRADICT, or sharpen an existing bullet ("update" or "replace" op) — it must never spawn a brand new bullet by itself.
-- Only a "high" confidence lesson may spawn a new bullet, and ONLY if nothing existing already captures it, AND ONLY if it names a specific threshold, metric, or condition (a screener field, a percentage, a named regime) — not a platitude that's true in almost any month. "Avoid volatile assets", "diversify", "reassess regularly", or "limit position size" with no number attached do NOT qualify for "add"; route them to "update" on an existing bullet instead, or drop them.
+- A "low" confidence lesson may only REINFORCE or CONTRADICT an existing bullet (an "update" op) — it must never spawn a brand new bullet by itself.
+- A "high" or "medium" confidence lesson may spawn a new bullet, but ONLY if nothing existing already captures it, AND ONLY if it names a specific threshold, metric, or condition (a screener field, a percentage, a named regime) — not a platitude that's true in almost any month. "Avoid volatile assets", "diversify", "reassess regularly", or "limit position size" with no number attached do NOT qualify for "add"; route them to "update" on an existing bullet instead, or drop them.
 - Lesson duplicates/reinforces an existing bullet -> {{"op": "update", "id": "<id>", "helpful": 1}}
 - Lesson contradicts / is disproven by an existing bullet -> {{"op": "update", "id": "<id>", "harmful": 1}}
 - Lesson clearly generalizes or sharpens an existing bullet's wording (same idea, better phrasing, or adds the missing number) -> {{"op": "replace", "id": "<id>", "content": "<improved, more specific wording>"}}
 - Two existing bullets now say nearly the same thing (even worded differently) -> merge them: {{"op": "replace", "id": "<the stronger one>", "content": "<merged, more specific wording>"}} and {{"op": "remove", "id": "<the weaker one>"}}. Check for this actively — don't wait for a lesson to point it out.
-- Genuinely new, non-duplicate, HIGH-confidence-only, condition-specific lesson -> {{"op": "add", "section": "<one of the sections above>", "content": "<concise rule that names a specific threshold or metric>"}}
+- Genuinely new, non-duplicate, high/medium-confidence, condition-specific lesson -> {{"op": "add", "section": "<one of the sections above>", "content": "<concise rule that names a specific threshold or metric>"}}
 
 Respond ONLY with a JSON array of at most 8 ops, no other text."""
         user_prompt = f"Full existing playbook:\n{existing}\n\nNew candidate lessons:\n{json.dumps(lessons)}"
