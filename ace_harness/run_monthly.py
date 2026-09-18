@@ -62,7 +62,7 @@ def build_universe(tickers, start, end):
 def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_000.0,
                 rebalance_days=20, max_rounds=3, use_risk_harness=True, risk_harness_type="conviction",
                 adaptive_risk=True, include_screener_tool=True, fallback_mode="equal_weight",
-                truncate_context=False, max_tokens=800):
+                truncate_context=False, max_tokens=800, use_reward_model=True):
     universe = build_universe(tickers, start, end)
     solver = Solver(universe, include_screener_tool=include_screener_tool, fallback_mode=fallback_mode,
                      max_tokens=max_tokens, truncate_context=truncate_context, prompt_style="monthly")
@@ -98,10 +98,12 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
-        reward_model = (AdaptiveRewardModel.load(reward_model_path)
-                        if os.path.exists(reward_model_path)
-                        else AdaptiveRewardModel(universe.anon_universe))
+        reward_model, reward_model_path = None, None
+        if use_reward_model:
+            reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+            reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                            if os.path.exists(reward_model_path)
+                            else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_inter_task(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -128,10 +130,12 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
-        reward_model = (AdaptiveRewardModel.load(reward_model_path)
-                        if os.path.exists(reward_model_path)
-                        else AdaptiveRewardModel(universe.anon_universe))
+        reward_model, reward_model_path = None, None
+        if use_reward_model:
+            reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+            reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                            if os.path.exists(reward_model_path)
+                            else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_memory_only(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -143,10 +147,12 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
-        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
-        reward_model = (AdaptiveRewardModel.load(reward_model_path)
-                        if os.path.exists(reward_model_path)
-                        else AdaptiveRewardModel(universe.anon_universe))
+        reward_model, reward_model_path = None, None
+        if use_reward_model:
+            reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+            reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                            if os.path.exists(reward_model_path)
+                            else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_dual_permanent(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
@@ -193,6 +199,9 @@ def main():
                               "(off by default, matching your latest script, which sends full history)")
     parser.add_argument("--max_tokens", type=int, default=800,
                          help="per-turn output budget for the Solver (matches yesharnessgpt.py's max_tokens=800)")
+    parser.add_argument("--no_reward_model", action="store_true",
+                         help="disable the adaptive reward model signal for memory systems "
+                              "(inter/memory_only/dual_permanent); off by default so AdaReMo is active")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -203,6 +212,7 @@ def main():
             use_risk_harness=not args.no_risk_harness, risk_harness_type=args.risk_harness_type,
             adaptive_risk=not args.no_adaptive_risk, include_screener_tool=not args.no_screener,
             fallback_mode=args.fallback_mode, truncate_context=args.truncate_context, max_tokens=args.max_tokens,
+            use_reward_model=not args.no_reward_model,
         )
 
 

@@ -25,6 +25,7 @@ set -euo pipefail
 # ============================================================
 ACE_RUN_TAG="ace_fixed"   # <-- change between ACE-only submissions
 REACT_RUN_TAG="2"         # <-- tag of the existing ReAct results to reuse
+USE_REWARD_MODEL=1        # 1 = enable AdaReMo signal (default), 0 = disable it
 
 
 # ============================================================
@@ -181,6 +182,7 @@ echo "=========================================="
 echo "ACE-ONLY RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
 echo "Systems:    HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
+echo "AdaReMo:    $([ "$USE_REWARD_MODEL" = "1" ] && echo "ENABLED" || echo "disabled")"
 echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-FP8)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
@@ -260,6 +262,8 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo ""
         echo "--- ACE: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
         cd "$ROOT_DIR"
+        REWARD_MODEL_FLAG=""
+        [ "$USE_REWARD_MODEL" != "1" ] && REWARD_MODEL_FLAG="--no_reward_model"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
@@ -268,7 +272,8 @@ for MODEL_VERSION in qwen25 qwen36; do
             --output_dir "$ACE_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
-            --rebalance-days  "$REBALANCE_DAYS"
+            --rebalance-days  "$REBALANCE_DAYS" \
+            $REWARD_MODEL_FLAG
         cd "$REACT_DIR"
         echo "Done -> ${ACE_DIR}/"
 
