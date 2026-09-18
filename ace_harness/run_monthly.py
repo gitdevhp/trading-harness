@@ -32,6 +32,7 @@ from ace_harness.market import MarketUniverse
 from ace_harness.engine_monthly import run_backtest
 from ace_harness.memory import ExperienceMemory
 from ace_harness.agents import Solver, Debater, Consolidator, RiskTuner
+from ace_harness.reward_model import AdaptiveRewardModel
 from ace_harness.risk_harness import (
     GPTInstitutionalRiskHarness, SimpleTrailingRiskHarness, SimpleMomentumHarness, ConvictionHarness,
 )
@@ -97,9 +98,14 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
+        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+        reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                        if os.path.exists(reward_model_path)
+                        else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_inter_task(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
+            reward_model=reward_model, reward_model_path=reward_model_path,
         )
 
     elif system == "dual":
@@ -122,9 +128,14 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
+        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+        reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                        if os.path.exists(reward_model_path)
+                        else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_memory_only(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
+            reward_model=reward_model, reward_model_path=reward_model_path,
         )
 
     elif system == "dual_permanent":
@@ -132,9 +143,14 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
         if os.path.exists(memory_path):
             memory = ExperienceMemory.load(memory_path)
+        reward_model_path = os.path.join(output_dir, f"{tag}_rewardmodel.json")
+        reward_model = (AdaptiveRewardModel.load(reward_model_path)
+                        if os.path.exists(reward_model_path)
+                        else AdaptiveRewardModel(universe.anon_universe))
         decision_fn = harnesses.make_dual_permanent(
             universe, solver, debater, Consolidator(), memory, memory_path,
             risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
+            reward_model=reward_model, reward_model_path=reward_model_path,
         )
 
     else:
