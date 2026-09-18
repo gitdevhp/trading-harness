@@ -182,7 +182,7 @@ def _rebal_set(df):
 def _run(df, weight_fn):
     n = df.shape[1]
     rebal = _rebal_set(df)
-    shares, cash = np.zeros(n), 0.0
+    shares, cash = np.zeros(n), INITIAL_CAPITAL  # deploy capital on first rebalance day
     nav = [INITIAL_CAPITAL]
     for i, d in enumerate(df.index):
         prices = df.iloc[i].values
