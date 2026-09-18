@@ -105,10 +105,13 @@ def make_inter_task(universe, solver, debater, consolidator, memory, memory_path
         if past_dates:
             prev_date = past_dates[-1]
             prev = decision_log[prev_date]
+            # Use the playbook snapshot the Solver actually saw at decision time,
+            # so bullet grading in post_task_reflect references the correct bullets.
+            decision_playbook = (prev.get("meta") or {}).get("playbook_snapshot") or memory.format_for_prompt()
             realized_prices = universe.close_prices(current_date)
             reflection = debater.post_task_reflect(
                 prev_date, current_date, prev["targets"], prev["close_prices"], realized_prices,
-                playbook_text=memory.format_for_prompt(), decision_screener_text=prev.get("screener"),
+                playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
             )
             _apply_bullet_checks(memory, reflection.get("bullet_checks"))
             ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
@@ -124,9 +127,11 @@ def make_inter_task(universe, solver, debater, consolidator, memory, memory_path
                 if risk_params_path:
                     risk_harness.save_params(risk_params_path)
 
+        playbook_text = memory.format_for_prompt()
         raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                          playbook_text=memory.format_for_prompt())
-        meta = {"trace": trace}
+                                          playbook_text=playbook_text,
+                                          risk_params=risk_harness.get_params() if risk_harness else None)
+        meta = {"trace": trace, "playbook_snapshot": playbook_text}
 
         if risk_harness is not None:
             final_alloc = risk_harness.apply(raw_alloc, current_date, portfolio_state["portfolio_value"])
@@ -152,10 +157,11 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
         if past_dates:
             prev_date = past_dates[-1]
             prev = decision_log[prev_date]
+            decision_playbook = (prev.get("meta") or {}).get("playbook_snapshot") or memory.format_for_prompt()
             realized_prices = universe.close_prices(current_date)
             reflection = debater.post_task_reflect(
                 prev_date, current_date, prev["targets"], prev["close_prices"], realized_prices,
-                playbook_text=memory.format_for_prompt(), decision_screener_text=prev.get("screener"),
+                playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
             )
             _apply_bullet_checks(memory, reflection.get("bullet_checks"))
             ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
@@ -179,10 +185,11 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
         direction = None
         raw_alloc, trace, rounds_log, all_lessons = None, None, [], []
 
+        _rp = risk_harness.get_params() if risk_harness else None
         for r in range(1, max_rounds + 1):
             raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                               playbook_text=playbook_text, feedback_text=feedback,
-                                              direction=direction)
+                                              direction=direction, risk_params=_rp)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
                                                 playbook_text=playbook_text, round_num=r)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
@@ -196,7 +203,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
         memory.apply_delta_ops(ops)
         memory.save(memory_path)
 
-        meta = {"rounds": rounds_log}
+        meta = {"rounds": rounds_log, "playbook_snapshot": playbook_text}
         if risk_harness is not None:
             final_alloc = risk_harness.apply(raw_alloc, current_date, portfolio_state["portfolio_value"])
             meta["pre_harness_allocations"] = raw_alloc
@@ -306,14 +313,17 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         if past_dates:
             prev_date = past_dates[-1]
             prev = decision_log[prev_date]
+            decision_playbook = (prev.get("meta") or {}).get("playbook_snapshot") or memory.format_for_prompt()
             realized_prices = universe.close_prices(current_date)
             reflection = debater.post_task_reflect(
                 prev_date, current_date, prev["targets"], prev["close_prices"], realized_prices,
-                playbook_text=memory.format_for_prompt(), decision_screener_text=prev.get("screener"),
+                playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
             )
             _apply_bullet_checks(memory, reflection.get("bullet_checks"))
             ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
             memory.apply_delta_ops(ops)
+            # Save after slow-loop ops so reflection updates survive a fast-loop crash.
+            memory.save(memory_path)
 
             if risk_harness is not None and risk_tuner is not None:
                 deltas = risk_tuner.propose_adjustments(
@@ -329,9 +339,10 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         screener = universe.get_market_screener(current_date)
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
                         f"Cash: {portfolio_state['cash_pct']:.1f}%")
+        _rp = risk_harness.get_params() if risk_harness else None
 
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                   playbook_text=playbook_text)
+                                                   playbook_text=playbook_text, risk_params=_rp)
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
                                             playbook_text=playbook_text, round_num=1)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
@@ -343,7 +354,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         else:
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=playbook_text, feedback_text=review["feedback"],
-                                                        direction=review.get("direction"))
+                                                        direction=review.get("direction"), risk_params=_rp)
             # Review the revised allocation so the Debater can check whether the
             # Solver actually addressed its concern, and extract any new lessons.
             second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
@@ -355,7 +366,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         memory.apply_delta_ops(ops)
         memory.save(memory_path)
 
-        meta = {"rounds": rounds_log}
+        meta = {"rounds": rounds_log, "playbook_snapshot": playbook_text}
         if risk_harness is not None:
             harnessed = risk_harness.apply(final_alloc, current_date, portfolio_state["portfolio_value"])
             meta["pre_harness_allocations"] = final_alloc
