@@ -180,7 +180,7 @@ get_tickers() {
 echo "=========================================="
 echo "ACE-ONLY RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
-echo "Systems:    HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
+echo "Systems:    HARNESS+MEMORY+DEBATER (dual_permanent only)"
 echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
@@ -258,13 +258,13 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         echo ""
-        echo "--- ACE: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
+        echo "--- ACE: HARNESS+MEMORY+DEBATER (dual_permanent) ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
             --end     "$END_DATE" \
-            --systems intra memory_only dual_permanent \
+            --systems dual_permanent \
             --output_dir "$ACE_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
