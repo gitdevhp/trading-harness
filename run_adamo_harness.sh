@@ -1,30 +1,24 @@
 #!/bin/bash
-#SBATCH --time=24:00:00
+#SBATCH --time=12:00:00
 #SBATCH --nodes=1
 #SBATCH --mem=64gb
-#SBATCH --output=log/ace_only_%j.out
-#SBATCH --error=log/ace_only_%j.out
-#SBATCH --job-name=AceOnly
+#SBATCH --output=log/adamo_harness_%j.out
+#SBATCH --error=log/adamo_harness_%j.out
+#SBATCH --job-name=AdaMoHarness
 #SBATCH --gres=gpu:a100:2
 #SBATCH --partition=mhong
 
 set -euo pipefail
 
 # ============================================================
-# ACE-ONLY RUN — re-runs only the three ACE systems so you can
-# iterate on memory / Debater / dual without re-running the
-# ReAct baselines (which are slow and already stable).
+# HARNESS + AdaReMo RUN
+# Runs the conviction harness + adaptive reward model only —
+# no memory, no debater. Clean ablation against the standard
+# harness baseline.
 #
-# Two tags:
-#   ACE_RUN_TAG    — names the new ace_results_<tag>/ and
-#                    summary_<tag>/ directories for THIS run
-#   REACT_RUN_TAG  — points at the existing ReAct results
-#                    directory to use in the final summary
-#                    (set this to whichever previous run tag
-#                    has good ReAct results, e.g. "2" or "fixed")
+# RUN_TAG — names the output directory: adamo_results_<tag>/
 # ============================================================
-ACE_RUN_TAG="ace_fixed"   # <-- change between ACE-only submissions
-REACT_RUN_TAG="2"         # <-- tag of the existing ReAct results to reuse
+RUN_TAG="adamo_v1"   # <-- change between submissions
 
 
 # ============================================================
@@ -36,19 +30,11 @@ mkdir -p log
 module load gcc/11.3.0
 module load miniforge
 
-REACT_DIR="/users/2/cai00317/trading-harness/ReAct"
 ROOT_DIR="/users/2/cai00317/trading-harness"
+REACT_DIR="/users/2/cai00317/trading-harness/ReAct"
 
 cd "$REACT_DIR"
 source venv/bin/activate
-
-# Existing ReAct results — read-only, not regenerated
-REACT_RESULTS_DIR="${REACT_DIR}/results_${REACT_RUN_TAG}"
-if [ ! -d "$REACT_RESULTS_DIR" ]; then
-    echo "ERROR: REACT_RESULTS_DIR does not exist: ${REACT_RESULTS_DIR}"
-    echo "Set REACT_RUN_TAG to a tag that has completed ReAct results."
-    exit 1
-fi
 
 export HF_HOME="$HOME/hf_cache"
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -91,12 +77,10 @@ clear_port() {
     pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         echo "WARNING: Port ${VLLM_PORT} in use (${pids}). Killing..."
-        # shellcheck disable=SC2086
         kill -TERM $pids 2>/dev/null || true
         sleep 5
         pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
         if [ -n "$pids" ]; then
-            # shellcheck disable=SC2086
             kill -9 $pids 2>/dev/null || true
             sleep 3
         fi
@@ -128,8 +112,8 @@ start_vllm() {
     local served_model
     served_model=$(curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" | \
         python3 -c "import sys,json; d=json.load(sys.stdin); print(d['data'][0]['id'])" 2>/dev/null || echo "unknown")
-    if [ "$served_model" != "$REACT_MODEL" ]; then
-        echo "ERROR: Expected '${REACT_MODEL}' but serving '${served_model}'. Aborting."
+    if [ "$served_model" != "$EXPECT_MODEL" ]; then
+        echo "ERROR: Expected '${EXPECT_MODEL}' but serving '${served_model}'. Aborting."
         stop_vllm
         exit 1
     fi
@@ -149,8 +133,6 @@ stop_vllm() {
     local pids
     pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
     if [ -n "$pids" ]; then
-        echo "Killing stale process(es) on port ${VLLM_PORT}: ${pids}"
-        # shellcheck disable=SC2086
         kill -9 $pids 2>/dev/null || true
         sleep 3
     fi
@@ -174,26 +156,24 @@ get_tickers() {
 
 
 # ============================================================
-# CONFIGURATION SUMMARY
+# SUMMARY
 # ============================================================
 
 echo "=========================================="
-echo "ACE-ONLY RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
+echo "HARNESS + AdaReMo RUN  [tag: ${RUN_TAG}]"
 echo "=========================================="
-echo "Systems:    HARNESS+MEMORY+DEBATER (dual_permanent)  |  +AdaReMo"
+echo "System:     Conviction harness + AdaReMo (no memory, no debater)"
 echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B-FP8)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
 echo "Capital:    \$${INITIAL_CAPITAL}  |  Fees: 15 bps  |  Rebalance: monthly"
-echo "ReAct in:   ${REACT_RESULTS_DIR}/  (existing, not re-run)"
-echo "ACE out:    ${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/"
-echo "Summary:    ${ROOT_DIR}/summary_${ACE_RUN_TAG}/"
+echo "Output:     ${ROOT_DIR}/adamo_results_${RUN_TAG}/"
 echo "=========================================="
 echo ""
 
 
 # ============================================================
-# MAIN LOOP — model × universe (ACE only)
+# MAIN LOOP — model × universe
 # ============================================================
 
 for MODEL_VERSION in qwen25 qwen36; do
@@ -226,11 +206,9 @@ for MODEL_VERSION in qwen25 qwen36; do
         )
     fi
 
-    export REACT_MODEL="$MODEL"
+    export EXPECT_MODEL="$MODEL"
     export ACE_LLM_BASE_URL="http://127.0.0.1:${VLLM_PORT}/v1"
     export ACE_SOLVER_MODEL="$MODEL"
-    export ACE_DEBATER_MODEL="$MODEL"
-    export ACE_CONSOLIDATOR_MODEL="$MODEL"
 
     echo "=========================================="
     echo "MODEL: ${MODEL}  (tag: qwen${MODEL_TAG})"
@@ -242,9 +220,9 @@ for MODEL_VERSION in qwen25 qwen36; do
         TICKERS=$(get_tickers "$UNIVERSE_TAG")
         read -ra TICKER_ARRAY <<< "$TICKERS"
 
-        ACE_DIR="${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
-        rm -rf "$ACE_DIR"
-        mkdir -p "$ACE_DIR"
+        OUT_DIR="${ROOT_DIR}/adamo_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+        rm -rf "$OUT_DIR"
+        mkdir -p "$OUT_DIR"
 
         echo ""
         echo "=========================================="
@@ -252,34 +230,19 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "Tickers:  ${TICKERS}"
         echo "=========================================="
 
-        echo ""
-        echo "--- ACE: HARNESS+MEMORY+DEBATER (dual_permanent) ---"
         cd "$ROOT_DIR"
-        python -m ace_harness.run_monthly \
+        python -m ace_harness.run_monthly_baseline_adamo \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
             --end     "$END_DATE" \
-            --systems dual_permanent \
-            --output_dir "$ACE_DIR" \
+            --output_dir "$OUT_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
-            --rebalance-days  "$REBALANCE_DAYS"
-
-        echo ""
-        echo "--- ACE+AdaReMo: HARNESS+MEMORY+DEBATER+REWARD_MODEL ---"
-        python -m ace_harness.run_monthly_adamo \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --output_dir "$ACE_DIR" \
-            --risk_harness_type conviction \
-            --initial_capital "$INITIAL_CAPITAL" \
-            --rebalance-days  "$REBALANCE_DAYS"
+            --rebalance-days  "$REBALANCE_DAYS" \
+            --adamo_min_samples 2
         cd "$REACT_DIR"
-        echo "Done -> ${ACE_DIR}/"
 
-        echo ""
-        echo "Universe ${UNIVERSE_TAG} / qwen${MODEL_TAG} complete."
+        echo "Done -> ${OUT_DIR}/"
     done
 
     stop_vllm
@@ -288,80 +251,17 @@ done
 
 
 # ============================================================
-# PLOTTING — ACE only
+# FINAL LISTING
 # ============================================================
 
 echo ""
 echo "=========================================="
-echo "Generating ACE plots..."
-echo "=========================================="
-
-for MODEL_TAG in 25 36; do
-    for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
-        TICKERS=$(get_tickers "$UNIVERSE_TAG")
-        read -ra TICKER_ARRAY <<< "$TICKERS"
-
-        ACE_DIR="${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
-
-        echo "ACE plot:   qwen${MODEL_TAG}/${UNIVERSE_TAG} -> ${ACE_DIR}/ace_comparison.png"
-        cd "$ROOT_DIR"
-        python -m ace_harness.plot_results \
-            "${ACE_DIR}"/*.json \
-            --output_dir "$ACE_DIR" \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start "$START_DATE" \
-            --end   "$END_DATE" \
-            --initial_capital "$INITIAL_CAPITAL" \
-        || echo "WARNING: ACE plot failed for qwen${MODEL_TAG}/${UNIVERSE_TAG}"
-
-        python -m ace_harness.compare_results "${ACE_DIR}"/*.json \
-        || echo "WARNING: compare_results failed for qwen${MODEL_TAG}/${UNIVERSE_TAG}"
-        cd "$REACT_DIR"
-    done
-done
-
-
-# ============================================================
-# FINAL AGGREGATE SUMMARY
-# Reads new ACE results + existing ReAct results from REACT_RUN_TAG
-# ============================================================
-
-echo ""
-echo "=========================================="
-echo "Building full aggregate summary..."
-echo "=========================================="
-
-SUMMARY_DIR="${ROOT_DIR}/summary_${ACE_RUN_TAG}"
-mkdir -p "$SUMMARY_DIR"
-
-cd "$ROOT_DIR"
-python -m ace_harness.summarize_full_run \
-    --react_dir     "${REACT_RESULTS_DIR}" \
-    --ace_base      "${ROOT_DIR}/ace_results_${ACE_RUN_TAG}" \
-    --output_dir    "$SUMMARY_DIR" \
-    --model_tags    25 36 \
-    --universe_tags tech18 mag7 balanced15 sp30 diversified40 volatile25
-
-echo ""
-echo "Full summary -> ${SUMMARY_DIR}/"
-
-
-# ============================================================
-# FINAL FILE LISTING
-# ============================================================
-
-echo ""
-echo "=========================================="
-echo "ACE-ONLY RUN COMPLETE  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
+echo "HARNESS + AdaReMo COMPLETE  [tag: ${RUN_TAG}]"
 echo "=========================================="
 echo "Period:  ${START_DATE} -> ${END_DATE}"
 echo "Capital: \$${INITIAL_CAPITAL}  |  Fees: 15 bps"
 echo ""
-echo "ACE result directories (ace_results_${ACE_RUN_TAG}/):"
-ls -lhd "${ROOT_DIR}/ace_results_${ACE_RUN_TAG}"/qwen*/ 2>/dev/null | awk '{print "  "$NF}' \
-    || echo "  (none)"
-echo ""
-echo "Summary files (${SUMMARY_DIR}/):"
-ls -lh "${SUMMARY_DIR}/" 2>/dev/null | awk '{print "  "$NF, $5}' \
+echo "Result directories:"
+ls -lhd "${ROOT_DIR}/adamo_results_${RUN_TAG}"/qwen*/ 2>/dev/null | awk '{print "  "$NF}' \
     || echo "  (none)"
 echo "=========================================="

@@ -377,6 +377,59 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
     return decision_fn
 
 
+def make_baseline_adamo(universe, solver, reward_model, risk_harness=None):
+    """Harness + AdaReMo only — no memory, no debater.
+
+    After each period, AdaReMo is updated with the realized per-asset returns
+    and the executed allocation. From period min_samples onward, the Solver's
+    prompt receives a realized-return signal: which assets actually delivered
+    in this backtest, with average and most-recent monthly return shown, plus
+    a Ridge-regression sizing weight. The signal is directive ("increase /
+    reduce allocation") so the at-temperature-0 Solver uses it rather than
+    treating it as decorative text.
+
+    No lookahead: AdaReMo only sees data from periods already completed.
+    """
+    def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
+        past_dates = sorted(decision_log.keys())
+        if past_dates:
+            prev_date = past_dates[-1]
+            prev = decision_log[prev_date]
+            realized_prices = universe.close_prices(current_date)
+
+            # Compute per-asset realized returns for the previous period
+            per_asset_returns = {}
+            for asset, entry_price in (prev.get("close_prices") or {}).items():
+                exit_price = realized_prices.get(asset)
+                if exit_price and entry_price:
+                    per_asset_returns[asset] = round(
+                        (exit_price - entry_price) / entry_price * 100.0, 2
+                    )
+
+            if per_asset_returns:
+                reward_model.record(prev["targets"], per_asset_returns)
+                reward_model.fit()
+
+        reward_signal = reward_model.signal_text()
+        _rp = risk_harness.get_params() if risk_harness else None
+
+        raw_alloc, trace = solver.decide(
+            current_date, portfolio_state, rebalance_days,
+            playbook_text=reward_signal if reward_signal else None,
+            risk_params=_rp,
+        )
+
+        meta = {"trace": trace}
+        if risk_harness is not None:
+            final_alloc = risk_harness.apply(raw_alloc, current_date, portfolio_state["portfolio_value"])
+            meta["pre_harness_allocations"] = raw_alloc
+            meta["risk_params"] = risk_harness.get_params()
+            return final_alloc, meta
+
+        return raw_alloc, meta
+    return decision_fn
+
+
 def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, memory_path,
                                reward_model, risk_harness=None, risk_tuner=None, risk_params_path=None):
     """dual_permanent + AdaReMo: identical flow to make_dual_permanent, with one
@@ -402,14 +455,10 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
             memory.apply_delta_ops(ops)
             memory.save(memory_path)
 
-            # Update AdaReMo: record previous allocation → realized weighted return
+            # Update AdaReMo with per-asset realized returns
             rr = reflection["realized_return_pct"]
             if rr:
-                prev_alloc = prev["targets"]
-                weighted_return = sum(
-                    (prev_alloc.get(a, 0.0) / 100.0) * ret for a, ret in rr.items()
-                )
-                reward_model.record(prev_alloc, float(weighted_return))
+                reward_model.record(prev["targets"], rr)
                 reward_model.fit()
 
             if risk_harness is not None and risk_tuner is not None:
