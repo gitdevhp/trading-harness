@@ -1,12 +1,12 @@
 #!/bin/bash
-#SBATCH --time=72:00:00
+#SBATCH --time=20:00:00
 #SBATCH --nodes=1
 #SBATCH --mem=64gb
 #SBATCH --output=log/react_cross_compare_%j.out
 #SBATCH --error=log/react_cross_compare_%j.out
 #SBATCH --job-name=ReAct_CrossCompare
-#SBATCH --gres=gpu:a40:2
-#SBATCH --partition=interactive-gpu
+#SBATCH --gres=gpu:a100:4
+#SBATCH --partition=mhong
 
 set -euo pipefail
 
