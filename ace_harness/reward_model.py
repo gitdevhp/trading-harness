@@ -9,7 +9,7 @@ market state; AdaReMo reports from realized outcomes.
 
 Two layers of signal:
   1. Per-asset realized return history — direct evidence, shown first.
-     "ASSET_X returned +9.1%, +12.4% over the last 2 periods."
+     Exponentially weighted so recent periods count more (decay=0.9 by default).
   2. Ridge regression on allocation weights → portfolio return — tells the
      Solver which assets its sizing decisions have historically correlated
      with better portfolio-level outcomes, controlling for co-movement.
@@ -18,9 +18,10 @@ import numpy as np
 
 
 class AdaptiveRewardModel:
-    def __init__(self, alpha: float = 1.0, min_samples: int = 2):
+    def __init__(self, alpha: float = 1.0, min_samples: int = 2, decay: float = 0.9):
         self.alpha = alpha
         self.min_samples = min_samples
+        self.decay = decay           # recency weight: most recent period = 1.0, prior = decay^1, ...
         self._assets = None          # fixed ordering after first record()
         self._X = []                 # allocation vectors (fractions)
         self._y = []                 # realized weighted portfolio returns (%)
@@ -67,7 +68,15 @@ class AdaptiveRewardModel:
         except np.linalg.LinAlgError:
             pass
 
-    def signal_text(self, top_k: int = 4) -> str:
+    def _weighted_avg(self, rets: list) -> float:
+        """Exponentially weighted average — most recent period has weight 1.0."""
+        if not rets:
+            return 0.0
+        weights = [self.decay ** i for i in range(len(rets) - 1, -1, -1)]
+        total_w = sum(weights)
+        return sum(w * r for w, r in zip(weights, rets)) / total_w
+
+    def signal_text(self, top_k: int = 5) -> str:
         """Return a sizing-directive block for the Solver prompt.
         Empty string until min_samples periods have accumulated."""
         n = len(self._y)
@@ -76,30 +85,36 @@ class AdaptiveRewardModel:
 
         parts = []
 
-        # --- Layer 1: raw per-asset return history ---
-        asset_avgs = {
-            a: (sum(rets) / len(rets), rets[-1], len(rets))
-            for a, rets in self._asset_returns.items()
-            if len(rets) >= 1 and a != "CASH"
-        }
-        if asset_avgs:
-            ranked = sorted(asset_avgs.items(), key=lambda kv: kv[1][0], reverse=True)
-            top_hist = [(a, avg, last, cnt) for a, (avg, last, cnt) in ranked[:top_k] if avg > 0.5]
-            bot_hist = [(a, avg, last, cnt) for a, (avg, last, cnt) in ranked[-top_k:] if avg < -0.5]
+        # --- Layer 1: exponentially weighted per-asset return history ---
+        asset_stats = {}
+        for a, rets in self._asset_returns.items():
+            if a == "CASH" or not rets:
+                continue
+            w_avg = self._weighted_avg(rets)
+            trend = rets[-1] - (rets[-2] if len(rets) >= 2 else rets[-1])
+            asset_stats[a] = (w_avg, rets[-1], len(rets), trend)
+
+        if asset_stats:
+            ranked = sorted(asset_stats.items(), key=lambda kv: kv[1][0], reverse=True)
+            # Always show top and bottom performers — no arbitrary threshold
+            top_hist = [(a, *s) for a, s in ranked[:top_k] if s[0] > 0]
+            bot_hist = [(a, *s) for a, s in ranked[-top_k:] if s[0] < 0]
             if top_hist:
                 entries = ", ".join(
-                    f"{a}(avg +{avg:.1f}%, last {'+' if last>=0 else ''}{last:.1f}%, n={cnt})"
-                    for a, avg, last, cnt in top_hist
+                    f"{a}(w_avg +{avg:.1f}%, last {'+' if last>=0 else ''}{last:.1f}%"
+                    f"{', improving' if trend > 0.5 else ', declining' if trend < -0.5 else ''})"
+                    for a, avg, last, cnt, trend in top_hist
                 )
                 parts.append(f"Realized outperformers — INCREASE allocation: {entries}")
             if bot_hist:
                 entries = ", ".join(
-                    f"{a}(avg {avg:.1f}%, last {'+' if last>=0 else ''}{last:.1f}%, n={cnt})"
-                    for a, avg, last, cnt in bot_hist
+                    f"{a}(w_avg {avg:.1f}%, last {'+' if last>=0 else ''}{last:.1f}%"
+                    f"{', improving' if trend > 0.5 else ', declining' if trend < -0.5 else ''})"
+                    for a, avg, last, cnt, trend in bot_hist
                 )
                 parts.append(f"Realized underperformers — REDUCE or AVOID: {entries}")
 
-        # --- Layer 2: Ridge regression weights ---
+        # --- Layer 2: Ridge regression weights (normalized to percentile rank) ---
         if self._fitted and self._weights is not None:
             scores = {
                 a: float(self._weights[i])
@@ -111,14 +126,14 @@ class AdaptiveRewardModel:
             ridge_bot = [(a, v) for a, v in ranked_r[-top_k:] if v < 0]
             if ridge_top:
                 parts.append(
-                    "Sizing model (Ridge, {} periods) — higher weight historically correlated with better returns: {}".format(
-                        n, ", ".join(f"{a}(+{v:.2f}%)" for a, v in ridge_top)
+                    "Sizing model (Ridge, {} periods, recent-weighted) — historically correlated with better portfolio returns — OVERWEIGHT: {}".format(
+                        n, ", ".join(f"{a}" for a, v in ridge_top)
                     )
                 )
             if ridge_bot:
                 parts.append(
-                    "Sizing model — lower weight historically correlated with better returns: {}".format(
-                        ", ".join(f"{a}({v:.2f}%)" for a, v in ridge_bot)
+                    "Sizing model — historically correlated with worse portfolio returns — UNDERWEIGHT: {}".format(
+                        ", ".join(f"{a}" for a, v in ridge_bot)
                     )
                 )
 
@@ -126,7 +141,7 @@ class AdaptiveRewardModel:
             return ""
 
         return (
-            f"ADAPTIVE REWARD SIGNAL — {n} realized periods from this backtest.\n"
+            f"ADAPTIVE REWARD SIGNAL — {n} realized periods from this backtest (recent periods weighted higher).\n"
             f"Use this evidence to SIZE positions: increase weight on outperformers, "
             f"reduce on underperformers, subject to screener confirmation.\n"
             + "\n".join(f"  • {p}" for p in parts)
