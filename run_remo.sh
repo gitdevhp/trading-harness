@@ -15,6 +15,7 @@ set -euo pipefail
 #
 # Runs HARNESS+REMO (plain reward model, raw returns) for both
 # models across all universes and produces per-universe plots.
+# Resumable: universes with existing *.json output are skipped.
 #
 #   System: HARNESS+REMO — run_monthly_baseline_remo
 #
@@ -239,6 +240,22 @@ for MODEL_VERSION in qwen25 qwen36; do
     export ACE_LLM_BASE_URL="http://127.0.0.1:${VLLM_PORT}/v1"
     export ACE_SOLVER_MODEL="$MODEL"
 
+    # Check if all universes for this model are already done; skip vLLM startup if so.
+    all_done=true
+    for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
+        REMO_DIR="${ROOT_DIR}/remo_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+        if ! compgen -G "${REMO_DIR}/*.json" > /dev/null 2>&1; then
+            all_done=false
+            break
+        fi
+    done
+
+    if $all_done; then
+        echo ""
+        echo "SKIP MODEL: all universes for qwen${MODEL_TAG} already have results."
+        continue
+    fi
+
     echo "=========================================="
     echo "MODEL: ${MODEL}  (tag: qwen${MODEL_TAG})"
     echo "=========================================="
@@ -250,6 +267,12 @@ for MODEL_VERSION in qwen25 qwen36; do
         read -ra TICKER_ARRAY <<< "$TICKERS"
 
         REMO_DIR="${ROOT_DIR}/remo_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+
+        if compgen -G "${REMO_DIR}/*.json" > /dev/null 2>&1; then
+            echo ""
+            echo "SKIP: ${REMO_DIR}/ already has results — skipping."
+            continue
+        fi
         rm -rf "$REMO_DIR"
         mkdir -p "$REMO_DIR"
 
