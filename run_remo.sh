@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --time=18:00:00
 #SBATCH --nodes=1
-#SBATCH --mem=128gb
+#SBATCH --mem=64gb
 #SBATCH --output=log/remo_%j.out
 #SBATCH --error=log/remo_%j.out
 #SBATCH --job-name=ReMo
