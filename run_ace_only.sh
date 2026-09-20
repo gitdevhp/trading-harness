@@ -120,7 +120,7 @@ clear_port() {
 start_vllm() {
     clear_port
     echo "Starting vLLM..."
-    python -m vllm.entrypoints.openai.api_server "$@" &
+    setsid python -m vllm.entrypoints.openai.api_server "$@" &
     VLLM_PID=$!
     echo "PID: ${VLLM_PID}"
     local start_time elapsed
@@ -156,7 +156,11 @@ start_vllm() {
 stop_vllm() {
     if [ -n "$VLLM_PID" ] && kill -0 "$VLLM_PID" 2>/dev/null; then
         echo "Stopping vLLM (PID ${VLLM_PID})..."
-        kill "$VLLM_PID" 2>/dev/null || true
+        # Kill the entire process group (setsid gives vLLM its own PGID = VLLM_PID),
+        # so EngineCore workers are cleaned up immediately instead of orphaning.
+        kill -TERM -- -"$VLLM_PID" 2>/dev/null || true
+        sleep 5
+        kill -KILL -- -"$VLLM_PID" 2>/dev/null || true
         wait "$VLLM_PID" 2>/dev/null || true
         VLLM_PID=""
     fi
