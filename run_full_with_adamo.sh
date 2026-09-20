@@ -18,6 +18,7 @@ set -euo pipefail
 # final summary table.
 #
 #   Systems (× 2 models each):
+#     HARNESS+REMO          — run_monthly_baseline_remo
 #     HARNESS+ADAMO         — run_monthly_baseline_adamo
 #     HARNESS+DEBATER       — run_monthly intra
 #     HARNESS+MEMORY        — run_monthly memory_only
@@ -193,7 +194,7 @@ get_tickers() {
 echo "=========================================="
 echo "ACE + AdaReMo RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
-echo "Systems:    HARNESS+ADAMO  HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
+echo "Systems:    HARNESS+REMO  HARNESS+ADAMO  HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
 echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
@@ -271,7 +272,22 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         echo ""
-        echo "--- 1/4: HARNESS+ADAMO ---"
+        echo "--- 1/5: HARNESS+REMO ---"
+        cd "$ROOT_DIR"
+        python -m ace_harness.run_monthly_baseline_remo \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start   "$START_DATE" \
+            --end     "$END_DATE" \
+            --output_dir "$ACE_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --rebalance-days  "$REBALANCE_DAYS" \
+            --remo_min_samples 2
+        cd "$REACT_DIR"
+        echo "Done -> ${ACE_DIR}/monthly_baseline_remo_*"
+
+        echo ""
+        echo "--- 2/5: HARNESS+ADAMO ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly_baseline_adamo \
             --tickers "${TICKER_ARRAY[@]}" \
@@ -286,7 +302,7 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "Done -> ${ACE_DIR}/monthly_baseline_adamo_*"
 
         echo ""
-        echo "--- 2-4/4: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
+        echo "--- 3-5/5: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \

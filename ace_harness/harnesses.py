@@ -420,6 +420,50 @@ def make_baseline_adamo(universe, solver, reward_model, risk_harness=None):
     return decision_fn
 
 
+def make_baseline_remo(universe, solver, reward_model, risk_harness=None):
+    """Harness + ReMo (plain Reward Model) — no memory, no debater, no risk-adjustment.
+
+    Identical flow to make_baseline_adamo but uses SimpleRewardModel, which
+    ranks assets by raw realized returns without Sharpe/Sortino/drawdown scoring.
+    Useful as a cleaner ablation between pure return-chasing and risk-adjusted guidance.
+    """
+    def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
+        past_dates = sorted(decision_log.keys())
+        if past_dates:
+            prev_date = past_dates[-1]
+            prev = decision_log[prev_date]
+            realized_prices = universe.close_prices(current_date)
+
+            per_asset_returns = {}
+            for asset, entry_price in (prev.get("close_prices") or {}).items():
+                exit_price = realized_prices.get(asset)
+                if exit_price and entry_price:
+                    per_asset_returns[asset] = round(
+                        (exit_price - entry_price) / entry_price * 100.0, 2
+                    )
+
+            if per_asset_returns:
+                reward_model.record(prev["targets"], per_asset_returns)
+                reward_model.fit()
+
+        reward_signal = reward_model.signal_text()
+
+        raw_alloc, trace = solver.decide(
+            current_date, portfolio_state, rebalance_days,
+            playbook_text=reward_signal if reward_signal else None,
+        )
+
+        meta = {"trace": trace}
+        if risk_harness is not None:
+            final_alloc = risk_harness.apply(raw_alloc, current_date, portfolio_state["portfolio_value"])
+            meta["pre_harness_allocations"] = raw_alloc
+            meta["risk_params"] = risk_harness.get_params()
+            return final_alloc, meta
+
+        return raw_alloc, meta
+    return decision_fn
+
+
 def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, memory_path,
                                reward_model, risk_harness=None, risk_tuner=None, risk_params_path=None):
     """dual_permanent + AdaReMo: identical flow to make_dual_permanent, with one
