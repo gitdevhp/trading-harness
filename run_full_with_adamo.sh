@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=48:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --mem=64gb
 #SBATCH --output=log/full_adamo_%j.out
@@ -11,16 +11,15 @@
 set -euo pipefail
 
 # ============================================================
-# FULL COMPARATIVE RUN + AdaReMo
+# ACE + AdaReMo RUN
 #
-# Runs every system for both models across all universes:
+# Runs the four ACE-side systems for both models across all
+# universes, then merges with existing ReAct results for the
+# final summary table.
 #
 #   Systems (× 2 models each):
-#     QWEN                  — qwen_port.py           (raw LLM, no ReAct)
-#     QWEN+REACT            — noharness.py            (ReAct, no harness)
-#     HARNESS               — yesharnessgpt.py        (ReAct + ConvictionHarness)
-#     HARNESS+ADAMO         — run_monthly_baseline_adamo  (Harness + AdaReMo)
-#     HARNESS+DEBATER       — run_monthly intra        (Debater, no memory)
+#     HARNESS+ADAMO         — run_monthly_baseline_adamo
+#     HARNESS+DEBATER       — run_monthly intra
 #     HARNESS+MEMORY        — run_monthly memory_only
 #     HARNESS+MEMORY+DEBATER— run_monthly dual_permanent
 #
@@ -32,12 +31,13 @@ set -euo pipefail
 #     qwen25 — Qwen2.5-32B-Instruct-AWQ  (TP=1, 1×A100)
 #     qwen36 — Qwen3.6-35B-A3B           (TP=4, 4×A100 — non-FP8 needs all 4)
 #
-#   Universes (6):
-#     tech18 | mag7 | balanced15 | sp30 | diversified40 | volatile25
-#
-# RUN_TAG — change between submissions so results never overwrite each other.
+# Two tags:
+#   ACE_RUN_TAG   — names ace_results_<tag>/ and summary_<tag>/
+#   REACT_RUN_TAG — existing ReAct results to reuse in the summary
+#                   (set to whichever prior run has good QWEN/REACT/HARNESS results)
 # ============================================================
-RUN_TAG="full_adamo_v1"   # <-- only line you need to change between runs
+ACE_RUN_TAG="adamo_v1"   # <-- change between submissions
+REACT_RUN_TAG="fixed"    # <-- tag of existing ReAct results to merge
 
 
 # ============================================================
@@ -55,8 +55,13 @@ ROOT_DIR="/users/2/cai00317/trading-harness"
 cd "$REACT_DIR"
 source venv/bin/activate
 
-REACT_RESULTS_DIR="${REACT_DIR}/results_${RUN_TAG}"
-mkdir -p "$REACT_RESULTS_DIR"
+# Existing ReAct results — read-only, not regenerated
+REACT_RESULTS_DIR="${REACT_DIR}/results_${REACT_RUN_TAG}"
+if [ ! -d "$REACT_RESULTS_DIR" ]; then
+    echo "ERROR: REACT_RESULTS_DIR does not exist: ${REACT_RESULTS_DIR}"
+    echo "Set REACT_RUN_TAG to a tag that has completed ReAct results."
+    exit 1
+fi
 
 export HF_HOME="$HOME/hf_cache"
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -186,18 +191,16 @@ get_tickers() {
 # ============================================================
 
 echo "=========================================="
-echo "FULL COMPARATIVE + AdaReMo RUN  [tag: ${RUN_TAG}]"
+echo "ACE + AdaReMo RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
-echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B, non-FP8)"
+echo "Systems:    HARNESS+ADAMO  HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
+echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
-echo "Systems:    QWEN  QWEN+REACT  HARNESS  HARNESS+ADAMO"
-echo "            HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
-echo "Baselines:  EW  Risk-Parity  60/40  Min-Var  Cov-RP  Black-Litterman"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
 echo "Capital:    \$${INITIAL_CAPITAL}  |  Fees: 15 bps  |  Rebalance: monthly"
-echo "ReAct out:  ${REACT_RESULTS_DIR}/"
-echo "ACE out:    ${ROOT_DIR}/ace_results_${RUN_TAG}/"
-echo "Summary:    ${ROOT_DIR}/summary_${RUN_TAG}/"
+echo "ReAct in:   ${REACT_RESULTS_DIR}/  (existing, not re-run)"
+echo "ACE out:    ${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/"
+echo "Summary:    ${ROOT_DIR}/summary_${ACE_RUN_TAG}/"
 echo "=========================================="
 echo ""
 
@@ -257,11 +260,7 @@ for MODEL_VERSION in qwen25 qwen36; do
         TICKERS=$(get_tickers "$UNIVERSE_TAG")
         read -ra TICKER_ARRAY <<< "$TICKERS"
 
-        RAW_OUT="${REACT_RESULTS_DIR}/qwen_raw_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-        NOHARN_OUT="${REACT_RESULTS_DIR}/react_no_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-        GPT_OUT="${REACT_RESULTS_DIR}/react_gpt_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-
-        ACE_DIR="${ROOT_DIR}/ace_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+        ACE_DIR="${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
         rm -rf "$ACE_DIR"
         mkdir -p "$ACE_DIR"
 
@@ -272,43 +271,7 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         echo ""
-        echo "--- 1/7: QWEN (raw) ---"
-        python qwen_port.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      0 \
-            --output  "$RAW_OUT"
-        echo "Done -> ${RAW_OUT}"
-
-        echo ""
-        echo "--- 2/7: QWEN+REACT (no harness) ---"
-        python noharness.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      0 \
-            --output  "$NOHARN_OUT"
-        echo "Done -> ${NOHARN_OUT}"
-
-        echo ""
-        echo "--- 3/7: HARNESS (ReAct + ConvictionHarness) ---"
-        python yesharnessgpt.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      0 \
-            --output  "$GPT_OUT"
-        echo "Done -> ${GPT_OUT}"
-
-        echo ""
-        echo "--- 4/7: HARNESS+ADAMO ---"
+        echo "--- 1/4: HARNESS+ADAMO ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly_baseline_adamo \
             --tickers "${TICKER_ARRAY[@]}" \
@@ -323,7 +286,7 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "Done -> ${ACE_DIR}/monthly_baseline_adamo_*"
 
         echo ""
-        echo "--- 5-7/7: ACE harness (DEBATER / MEMORY / MEMORY+DEBATER) ---"
+        echo "--- 2-4/4: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
@@ -347,12 +310,12 @@ done
 
 
 # ============================================================
-# PLOTTING
+# PLOTTING — ACE systems
 # ============================================================
 
 echo ""
 echo "=========================================="
-echo "Generating per-universe plots..."
+echo "Generating per-universe ACE plots..."
 echo "=========================================="
 
 for MODEL_TAG in 25 36; do
@@ -360,19 +323,7 @@ for MODEL_TAG in 25 36; do
         TICKERS=$(get_tickers "$UNIVERSE_TAG")
         read -ra TICKER_ARRAY <<< "$TICKERS"
 
-        RAW_OUT="${REACT_RESULTS_DIR}/qwen_raw_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-        NOHARN_OUT="${REACT_RESULTS_DIR}/react_no_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-        GPT_OUT="${REACT_RESULTS_DIR}/react_gpt_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
-        REACT_PLOT="${REACT_RESULTS_DIR}/compare_react_${MODEL_TAG}_${UNIVERSE_TAG}.png"
-        ACE_DIR="${ROOT_DIR}/ace_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
-
-        echo "ReAct plot: qwen${MODEL_TAG}/${UNIVERSE_TAG} -> ${REACT_PLOT}"
-        python plotport.py \
-            --gpt-harness-file "$GPT_OUT" \
-            --no-harness-file  "$NOHARN_OUT" \
-            --raw-llm-file     "$RAW_OUT" \
-            --output           "$REACT_PLOT" \
-        || echo "WARNING: ReAct plot failed for qwen${MODEL_TAG}/${UNIVERSE_TAG}"
+        ACE_DIR="${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
 
         echo "ACE plot:   qwen${MODEL_TAG}/${UNIVERSE_TAG} -> ${ACE_DIR}/ace_comparison.png"
         cd "$ROOT_DIR"
@@ -394,6 +345,7 @@ done
 
 # ============================================================
 # FINAL AGGREGATE SUMMARY
+# Reads new ACE+AdaReMo results + existing ReAct results
 # ============================================================
 
 echo ""
@@ -401,13 +353,13 @@ echo "=========================================="
 echo "Building full aggregate summary..."
 echo "=========================================="
 
-SUMMARY_DIR="${ROOT_DIR}/summary_${RUN_TAG}"
+SUMMARY_DIR="${ROOT_DIR}/summary_${ACE_RUN_TAG}"
 mkdir -p "$SUMMARY_DIR"
 
 cd "$ROOT_DIR"
 python -m ace_harness.summarize_full_run \
     --react_dir     "${REACT_RESULTS_DIR}" \
-    --ace_base      "${ROOT_DIR}/ace_results_${RUN_TAG}" \
+    --ace_base      "${ROOT_DIR}/ace_results_${ACE_RUN_TAG}" \
     --output_dir    "$SUMMARY_DIR" \
     --model_tags    25 36 \
     --universe_tags tech18 mag7 balanced15 sp30 diversified40 volatile25
@@ -422,17 +374,13 @@ echo "Full summary -> ${SUMMARY_DIR}/"
 
 echo ""
 echo "=========================================="
-echo "ALL RUNS COMPLETE  [tag: ${RUN_TAG}]"
+echo "ACE + AdaReMo RUN COMPLETE  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
 echo "Period:  ${START_DATE} -> ${END_DATE}"
 echo "Capital: \$${INITIAL_CAPITAL}  |  Fees: 15 bps"
 echo ""
-echo "ReAct results (${REACT_RESULTS_DIR}/):"
-ls -lh "${REACT_RESULTS_DIR}/"*.json 2>/dev/null | awk '{print "  "$NF, $5}' \
-    || echo "  (none)"
-echo ""
-echo "ACE result directories (ace_results_${RUN_TAG}/):"
-ls -lhd "${ROOT_DIR}/ace_results_${RUN_TAG}"/qwen*/ 2>/dev/null | awk '{print "  "$NF}' \
+echo "ACE result directories (ace_results_${ACE_RUN_TAG}/):"
+ls -lhd "${ROOT_DIR}/ace_results_${ACE_RUN_TAG}"/qwen*/ 2>/dev/null | awk '{print "  "$NF}' \
     || echo "  (none)"
 echo ""
 echo "Summary files (${SUMMARY_DIR}/):"
