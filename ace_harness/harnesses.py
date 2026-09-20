@@ -355,12 +355,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=playbook_text, feedback_text=review["feedback"],
                                                         direction=review.get("direction"), risk_params=_rp)
-            # Review the revised allocation so the Debater can check whether the
-            # Solver actually addressed its concern, and extract any new lessons.
-            second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
-                                                       playbook_text=playbook_text, round_num=2)
-            all_lessons.extend(second_review.get("lessons", []))
-            rounds_log.append({"round": 2, "allocations": final_alloc, "review": second_review})
+            rounds_log.append({"round": 2, "allocations": final_alloc})
 
         ops = consolidator.consolidate(memory, all_lessons, memory.sections)
         memory.apply_delta_ops(ops)
@@ -502,10 +497,7 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=combined_context, feedback_text=review["feedback"],
                                                         direction=review.get("direction"), risk_params=_rp)
-            second_review = debater.intra_task_review(current_date, screener, status_text, final_alloc,
-                                                       playbook_text=playbook_text, round_num=2)
-            all_lessons.extend(second_review.get("lessons", []))
-            rounds_log.append({"round": 2, "allocations": final_alloc, "review": second_review})
+            rounds_log.append({"round": 2, "allocations": final_alloc})
 
         ops = consolidator.consolidate(memory, all_lessons, memory.sections)
         memory.apply_delta_ops(ops)
