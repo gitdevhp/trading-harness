@@ -223,6 +223,12 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
     read -ra TICKER_ARRAY <<< "$TICKERS"
 
     REMO_DIR="${ROOT_DIR}/remo_results_${RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+
+    if compgen -G "${REMO_DIR}/*.json" > /dev/null 2>&1; then
+        echo ""
+        echo "SKIP: ${REMO_DIR}/ already has results — skipping."
+        continue
+    fi
     rm -rf "$REMO_DIR"
     mkdir -p "$REMO_DIR"
 
