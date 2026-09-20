@@ -5,7 +5,7 @@
 #SBATCH --output=log/remo_%j.out
 #SBATCH --error=log/remo_%j.out
 #SBATCH --job-name=ReMo
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --partition=mhong
 
 set -euo pipefail
@@ -223,7 +223,7 @@ for MODEL_VERSION in qwen25 qwen36; do
             --model "$MODEL"
             --host 127.0.0.1
             --port "$VLLM_PORT"
-            --tensor-parallel-size 2
+            --tensor-parallel-size 4
             --max-model-len 16384
             --gpu-memory-utilization 0.90
             --enable-chunked-prefill
