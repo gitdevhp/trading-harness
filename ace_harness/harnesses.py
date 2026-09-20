@@ -456,9 +456,15 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
             memory.save(memory_path)
 
             # Update AdaReMo with per-asset realized returns
-            rr = reflection["realized_return_pct"]
-            if rr:
-                reward_model.record(prev["targets"], rr)
+            per_asset_returns = {}
+            for asset, entry_price in (prev.get("close_prices") or {}).items():
+                exit_price = realized_prices.get(asset)
+                if exit_price and entry_price:
+                    per_asset_returns[asset] = round(
+                        (exit_price - entry_price) / entry_price * 100.0, 2
+                    )
+            if per_asset_returns:
+                reward_model.record(prev["targets"], per_asset_returns)
                 reward_model.fit()
 
             if risk_harness is not None and risk_tuner is not None:

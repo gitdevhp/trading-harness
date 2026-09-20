@@ -52,7 +52,6 @@ fi
 
 export HF_HOME="$HOME/hf_cache"
 export VLLM_USE_FLASHINFER_SAMPLER=0
-export PYTHONUNBUFFERED=1
 
 
 # ============================================================
