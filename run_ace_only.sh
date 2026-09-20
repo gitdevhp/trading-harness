@@ -262,6 +262,12 @@ for MODEL_VERSION in qwen25 qwen36; do
         read -ra TICKER_ARRAY <<< "$TICKERS"
 
         ACE_DIR="${ROOT_DIR}/ace_results_${ACE_RUN_TAG}/qwen${MODEL_TAG}_${UNIVERSE_TAG}"
+
+        if compgen -G "${ACE_DIR}/*.json" > /dev/null 2>&1; then
+            echo ""
+            echo "SKIP: ${ACE_DIR}/ already has results — skipping."
+            continue
+        fi
         rm -rf "$ACE_DIR"
         mkdir -p "$ACE_DIR"
 
