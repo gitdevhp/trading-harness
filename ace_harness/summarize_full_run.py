@@ -38,6 +38,14 @@ try:
 except ImportError:
     _HAS_SCIPY = False
 
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    _HAS_MPL = True
+except ImportError:
+    _HAS_MPL = False
+
 TRADING_DAYS = 252
 INITIAL_CAPITAL = 1_000_000.0
 FEE_RATE = 0.0015
@@ -51,14 +59,16 @@ REACT_STEMS = {
 
 # Glob pattern → display label for ACE result files
 ACE_GLOBS = {
-    "monthly_intra_*_results.json":           "HARNESS+DEBATER",
-    "monthly_memory_only_*_results.json":     "HARNESS+MEMORY",
-    "monthly_dual_permanent_*_results.json":  "HARNESS+MEMORY+DEBATER",
+    "monthly_intra_*_results.json":                "HARNESS+DEBATER",
+    "monthly_memory_only_*_results.json":          "HARNESS+MEMORY",
+    "monthly_dual_permanent_*_results.json":       "HARNESS+MEMORY+DEBATER",
+    "monthly_dual_permanent_adamo_*_results.json": "HARNESS+MEM+DEB+ADAMO",
 }
 
 AI_ORDER = [
     "QWEN", "QWEN+REACT", "HARNESS",
     "HARNESS+DEBATER", "HARNESS+MEMORY", "HARNESS+MEMORY+DEBATER",
+    "HARNESS+MEM+DEB+ADAMO",
 ]
 BASELINE_ORDER = [
     "Equal-Weight", "Risk-Parity", "60/40",
@@ -412,8 +422,10 @@ def main():
     all_rows = []
 
     # Baselines are computed once per universe from embedded ACE prices
-    baseline_navs = {}   # universe_tag -> {"Equal-Weight": np.array, ...}
-    price_dfs     = {}   # universe_tag -> pd.DataFrame (cached)
+    baseline_navs = {}      # universe_tag -> {"Equal-Weight": np.array, ...}
+    price_dfs     = {}      # universe_tag -> pd.DataFrame (cached)
+    nav_curves_by_key = {}  # (model_tag, universe_tag, system_label) -> np.array
+    dates_by_key      = {}  # (model_tag, universe_tag, system_label) -> [str]
 
     for ut in args.universe_tags:
         print(f"\n{'=' * 60}")
@@ -474,6 +486,8 @@ def main():
                 if m:
                     m.update(model=f"qwen{mt}", universe=ut, system=label)
                     all_rows.append(m)
+                    nav_curves_by_key[(f"qwen{mt}", ut, label)] = np.array(values)
+                    dates_by_key[(f"qwen{mt}", ut, label)] = dates
                     print(f"    {label:<26} TotalRet={m['total_return_pct']:>7.2f}%  Sharpe={m['sharpe']:>6.3f}")
 
             # ACE systems
@@ -490,6 +504,8 @@ def main():
                 if m:
                     m.update(model=f"qwen{mt}", universe=ut, system=label)
                     all_rows.append(m)
+                    nav_curves_by_key[(f"qwen{mt}", ut, label)] = np.array(values)
+                    dates_by_key[(f"qwen{mt}", ut, label)] = dates
                     print(f"    {label:<26} TotalRet={m['total_return_pct']:>7.2f}%  Sharpe={m['sharpe']:>6.3f}")
 
     # Save JSON
@@ -506,6 +522,79 @@ def main():
     # Print table to stdout
     with open(out_txt) as f:
         print(f.read())
+
+    # -----------------------------------------------------------------------
+    # Full comparison charts — one per (model, universe)
+    # Shows all AI systems as solid lines + all baselines as dashed lines.
+    # Requires nav_curves collected during the main loop above.
+    # -----------------------------------------------------------------------
+    if _HAS_MPL and nav_curves_by_key:
+        print("\nGenerating full comparison charts...")
+        _AI_COLORS = {
+            "QWEN":                  "#9e9e9e",
+            "QWEN+REACT":            "#607d8b",
+            "HARNESS":               "#2196f3",
+            "HARNESS+DEBATER":       "#ff9800",
+            "HARNESS+MEMORY":        "#4caf50",
+            "HARNESS+MEMORY+DEBATER":"#9c27b0",
+            "HARNESS+MEM+DEB+ADAMO": "#e91e63",
+        }
+        _BL_COLORS = {
+            "Equal-Weight":    "#000000",
+            "Risk-Parity":     "#795548",
+            "60/40":           "#ff5722",
+            "Min-Variance":    "#009688",
+            "Cov-Risk-Parity": "#3f51b5",
+            "Black-Litterman": "#ffc107",
+        }
+        for mt in args.model_tags:
+            for ut in args.universe_tags:
+                fig, ax = plt.subplots(figsize=(13, 6))
+                plotted = False
+
+                # AI systems
+                for sys_label in AI_ORDER:
+                    key = (f"qwen{mt}", ut, sys_label)
+                    nav = nav_curves_by_key.get(key)
+                    if nav is None:
+                        continue
+                    dates_key = dates_by_key.get(key, [])
+                    color = _AI_COLORS.get(sys_label, "#333333")
+                    x = list(range(len(nav)))
+                    ax.plot(x, nav / nav[0] * 100, color=color, linewidth=1.8,
+                            label=sys_label, zorder=3)
+                    plotted = True
+
+                # Baselines
+                bn = baseline_navs.get(ut, {})
+                df_b = price_dfs.get(ut)
+                for bl_label in BASELINE_ORDER:
+                    nav = bn.get(bl_label)
+                    if nav is None:
+                        continue
+                    color = _BL_COLORS.get(bl_label, "#888888")
+                    x = list(range(len(nav)))
+                    ax.plot(x, nav / nav[0] * 100, color=color, linewidth=1.0,
+                            linestyle="--", alpha=0.7, label=bl_label, zorder=2)
+                    plotted = True
+
+                if not plotted:
+                    plt.close(fig)
+                    continue
+
+                ax.set_title(f"Full Comparison — qwen{mt} / {ut}", fontsize=13)
+                ax.set_xlabel("Trading Day")
+                ax.set_ylabel("Normalized NAV (start=100)")
+                ax.axhline(100, color="#cccccc", linewidth=0.8, linestyle=":")
+                ax.legend(fontsize=7, ncol=2, loc="upper left")
+                ax.grid(True, alpha=0.3)
+                fig.tight_layout()
+                out_png = os.path.join(args.output_dir,
+                                       f"full_comparison_qwen{mt}_{ut}.png")
+                fig.savefig(out_png, dpi=130)
+                plt.close(fig)
+                print(f"  Chart -> {out_png}")
+        print("Charts done.")
 
 
 if __name__ == "__main__":
