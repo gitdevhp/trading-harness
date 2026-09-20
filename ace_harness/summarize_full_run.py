@@ -58,15 +58,20 @@ REACT_STEMS = {
 }
 
 # Glob pattern → display label for ACE result files
+# More-specific patterns must come before less-specific ones so a file that
+# matches both (e.g. dual_permanent_adamo vs dual_permanent) is captured by
+# the right label first.
 ACE_GLOBS = {
+    "monthly_baseline_adamo_*_results.json":       "HARNESS+ADAMO",
     "monthly_intra_*_results.json":                "HARNESS+DEBATER",
     "monthly_memory_only_*_results.json":          "HARNESS+MEMORY",
-    "monthly_dual_permanent_*_results.json":       "HARNESS+MEMORY+DEBATER",
     "monthly_dual_permanent_adamo_*_results.json": "HARNESS+MEM+DEB+ADAMO",
+    "monthly_dual_permanent_*_results.json":       "HARNESS+MEMORY+DEBATER",
 }
 
 AI_ORDER = [
     "QWEN", "QWEN+REACT", "HARNESS",
+    "HARNESS+ADAMO",
     "HARNESS+DEBATER", "HARNESS+MEMORY", "HARNESS+MEMORY+DEBATER",
     "HARNESS+MEM+DEB+ADAMO",
 ]
