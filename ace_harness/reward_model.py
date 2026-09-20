@@ -194,3 +194,129 @@ class AdaptiveRewardModel:
             f"SIZE UP assets with high return and low volatility; SIZE DOWN volatile or drawdown-prone assets.\n"
             + "\n".join(f"  • {p}" for p in parts)
         )
+
+
+class SimpleRewardModel:
+    """Plain Reward Model (ReMo): tracks per-asset realized returns and produces
+    a raw-return sizing signal — no risk-adjustment, no drawdown tracking.
+
+    Two layers of signal:
+      1. Exponentially weighted average return per asset — ranks assets by what
+         they actually delivered in this backtest.
+      2. Ridge regression on allocation weights → raw portfolio return — learns
+         which sizing decisions historically produced better outcomes.
+    """
+
+    def __init__(self, alpha: float = 1.0, min_samples: int = 2, decay: float = 0.9):
+        self.alpha = alpha
+        self.min_samples = min_samples
+        self.decay = decay
+        self._assets = None
+        self._X = []
+        self._y = []                 # raw weighted portfolio returns (%)
+        self._asset_returns = {}     # asset -> list[float] of per-period returns
+        self._weights = None
+        self._fitted = False
+
+    def _featurize(self, allocations: dict) -> np.ndarray:
+        return np.array([allocations.get(a, 0.0) / 100.0 for a in self._assets])
+
+    def record(self, allocations: dict, per_asset_returns: dict):
+        """Record one period's allocation + per-asset realized returns."""
+        if self._assets is None:
+            self._assets = sorted(allocations.keys())
+
+        self._X.append(self._featurize(allocations))
+
+        raw_return = sum(
+            allocations.get(a, 0.0) / 100.0 * ret
+            for a, ret in per_asset_returns.items()
+        )
+        self._y.append(float(raw_return))
+
+        for asset, ret in per_asset_returns.items():
+            self._asset_returns.setdefault(asset, []).append(float(ret))
+
+        self._fitted = False
+
+    def fit(self):
+        if len(self._X) < self.min_samples or self._assets is None:
+            return
+        X = np.array(self._X)
+        y = np.array(self._y)
+        n = X.shape[1]
+        try:
+            self._weights = np.linalg.solve(X.T @ X + self.alpha * np.eye(n), X.T @ y)
+            self._fitted = True
+        except np.linalg.LinAlgError:
+            pass
+
+    def _weighted_avg(self, rets: list) -> float:
+        if not rets:
+            return 0.0
+        w = [self.decay ** i for i in range(len(rets) - 1, -1, -1)]
+        tw = sum(w)
+        return sum(wi * r for wi, r in zip(w, rets)) / tw
+
+    def signal_text(self, top_k: int = 5) -> str:
+        """Return a sizing-directive block for the Solver prompt.
+        Empty string until min_samples periods have accumulated."""
+        n = len(self._y)
+        if n < self.min_samples:
+            return ""
+
+        parts = []
+
+        # --- Layer 1: raw return ranking ---
+        asset_avgs = {
+            a: self._weighted_avg(rets)
+            for a, rets in self._asset_returns.items()
+            if a != "CASH" and rets
+        }
+
+        if asset_avgs:
+            ranked = sorted(asset_avgs.items(), key=lambda kv: kv[1], reverse=True)
+            top_hist = [(a, avg) for a, avg in ranked[:top_k] if avg > 0]
+            bot_hist = [(a, avg) for a, avg in ranked[-top_k:] if avg < 0]
+
+            if top_hist:
+                entries = ", ".join(
+                    f"{a}(avg {'+' if avg >= 0 else ''}{avg:.1f}%)" for a, avg in top_hist
+                )
+                parts.append(f"Best realized returns — INCREASE allocation: {entries}")
+            if bot_hist:
+                entries = ", ".join(f"{a}(avg {avg:.1f}%)" for a, avg in bot_hist)
+                parts.append(f"Worst realized returns — REDUCE or AVOID: {entries}")
+
+        # --- Layer 2: Ridge weights ---
+        if self._fitted and self._weights is not None:
+            scores = {
+                a: float(self._weights[i])
+                for i, a in enumerate(self._assets)
+                if a != "CASH"
+            }
+            ranked_r = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+            ridge_top = [(a, v) for a, v in ranked_r[:top_k] if v > 0]
+            ridge_bot = [(a, v) for a, v in ranked_r[-top_k:] if v < 0]
+            if ridge_top:
+                parts.append(
+                    "Sizing model (Ridge/{} periods) — OVERWEIGHT for better returns: {}".format(
+                        n, ", ".join(a for a, _ in ridge_top)
+                    )
+                )
+            if ridge_bot:
+                parts.append(
+                    "Sizing model — UNDERWEIGHT (historically dragged returns): {}".format(
+                        ", ".join(a for a, _ in ridge_bot)
+                    )
+                )
+
+        if not parts:
+            return ""
+
+        return (
+            f"REWARD SIGNAL — {n} realized periods (recent-weighted).\n"
+            f"PRIMARY GOAL: maximize realized portfolio return. "
+            f"SIZE UP assets with consistently high recent returns; SIZE DOWN assets with negative recent returns.\n"
+            + "\n".join(f"  • {p}" for p in parts)
+        )
