@@ -260,6 +260,7 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         cd "$ROOT_DIR"
+        echo "--- HARNESS+REMO (reward signal on top of plain harness) ---"
         python -m ace_harness.run_monthly_baseline_remo \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
