@@ -129,8 +129,7 @@ def make_inter_task(universe, solver, debater, consolidator, memory, memory_path
 
         playbook_text = memory.format_for_prompt()
         raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                          playbook_text=playbook_text,
-                                          risk_params=risk_harness.get_params() if risk_harness else None)
+                                          playbook_text=playbook_text)
         meta = {"trace": trace, "playbook_snapshot": playbook_text}
 
         if risk_harness is not None:
@@ -185,11 +184,10 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
         direction = None
         raw_alloc, trace, rounds_log, all_lessons = None, None, [], []
 
-        _rp = risk_harness.get_params() if risk_harness else None
         for r in range(1, max_rounds + 1):
             raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                               playbook_text=playbook_text, feedback_text=feedback,
-                                              direction=direction, risk_params=_rp)
+                                              direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
                                                 playbook_text=playbook_text, round_num=r)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
@@ -339,10 +337,9 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         screener = universe.get_market_screener(current_date)
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
                         f"Cash: {portfolio_state['cash_pct']:.1f}%")
-        _rp = risk_harness.get_params() if risk_harness else None
 
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                   playbook_text=playbook_text, risk_params=_rp)
+                                                   playbook_text=playbook_text)
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
                                             playbook_text=playbook_text, round_num=1)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
@@ -354,7 +351,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         else:
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=playbook_text, feedback_text=review["feedback"],
-                                                        direction=review.get("direction"), risk_params=_rp)
+                                                        direction=review.get("direction"))
             rounds_log.append({"round": 2, "allocations": final_alloc})
 
         ops = consolidator.consolidate(memory, all_lessons, memory.sections)
@@ -406,12 +403,10 @@ def make_baseline_adamo(universe, solver, reward_model, risk_harness=None):
                 reward_model.fit()
 
         reward_signal = reward_model.signal_text()
-        _rp = risk_harness.get_params() if risk_harness else None
 
         raw_alloc, trace = solver.decide(
             current_date, portfolio_state, rebalance_days,
             playbook_text=reward_signal if reward_signal else None,
-            risk_params=_rp,
         )
 
         meta = {"trace": trace}
@@ -482,10 +477,9 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
         screener = universe.get_market_screener(current_date)
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
                         f"Cash: {portfolio_state['cash_pct']:.1f}%")
-        _rp = risk_harness.get_params() if risk_harness else None
 
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
-                                                   playbook_text=combined_context, risk_params=_rp)
+                                                   playbook_text=combined_context)
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
                                             playbook_text=playbook_text, round_num=1)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
@@ -496,7 +490,7 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
         else:
             final_alloc, second_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                         playbook_text=combined_context, feedback_text=review["feedback"],
-                                                        direction=review.get("direction"), risk_params=_rp)
+                                                        direction=review.get("direction"))
             rounds_log.append({"round": 2, "allocations": final_alloc})
 
         ops = consolidator.consolidate(memory, all_lessons, memory.sections)
