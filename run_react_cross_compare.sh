@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --time=48:00:00
+#SBATCH --time=72:00:00
 #SBATCH --nodes=1
 #SBATCH --mem=64gb
 #SBATCH --output=log/react_cross_compare_%j.out
@@ -11,7 +11,7 @@
 set -euo pipefail
 
 # ============================================================
-# CROSS-COMPARISON: both Qwen models × multiple portfolios
+# CROSS-COMPARISON: both Qwen models × all 6 portfolio universes
 #
 # Runs qwen_port.py, noharness.py, yesharnessgpt.py for every
 # (model, universe) combination, then plots each pair.
@@ -21,9 +21,12 @@ set -euo pipefail
 #   qwen36  — Qwen3.6-35B-A3B-FP8        (2 × A40, TP=2)
 #
 # Universes:
-#   tech18      — original 18 tech/mega-cap stocks
-#   mag7        — Magnificent 7 (concentrated momentum)
-#   balanced15  — diversified across tech/finance/health/consumer
+#   tech18        — original 18 tech/mega-cap stocks
+#   mag7          — Magnificent 7 (concentrated momentum)
+#   balanced15    — diversified across tech/finance/health/consumer
+#   sp30          — 30 S&P 500 stocks across all major GICS sectors
+#   diversified40 — 40 stocks; max sector breadth (tech/energy/industrials/consumer)
+#   volatile25    — 25 high-vol names (semis, cloud, biotech)
 # ============================================================
 
 
@@ -58,7 +61,16 @@ UNIVERSE_MAG7="AAPL MSFT NVDA AMZN GOOGL META TSLA"
 # Balanced 15 — cross-sector: tech + financials + healthcare + consumer
 UNIVERSE_BALANCED15="AAPL MSFT NVDA AMZN GOOGL META JPM JNJ XOM UNH HD WMT BAC PG CVX"
 
-UNIVERSE_TAGS=("tech18" "mag7" "balanced15")
+# 30 S&P 500 stocks spanning all major GICS sectors
+UNIVERSE_SP30="AAPL MSFT NVDA AVGO AMD ADBE QCOM ORCL AMAT MU GOOGL META NFLX AMZN TSLA HD BKNG NKE WMT PG KO JNJ LLY UNH ABBV JPM V MA GS BAC"
+
+# 40 stocks — maximum sector breadth: tech + energy + industrials + consumer
+UNIVERSE_DIVERSIFIED40="AAPL MSFT NVDA AVGO AMD ADBE QCOM ORCL AMAT MU GOOGL META NFLX CMCSA AMZN TSLA HD BKNG NKE MCD WMT PG KO JNJ LLY UNH ABBV JPM V MA GS BAC XOM CVX COP CAT HON RTX PEP DIS"
+
+# 25 high-volatility names: semis, cloud/SaaS, biotech
+UNIVERSE_VOLATILE25="NVDA AMD AVGO QCOM MU AMAT MRVL CRWD PLTR DDOG TSLA META AMZN UBER SPOT ABNB NFLX LLY MRNA BIIB VRTX ABBV AMGN REGN PFE"
+
+UNIVERSE_TAGS=("tech18" "mag7" "balanced15" "sp30" "diversified40" "volatile25")
 
 
 # ============================================================
@@ -165,9 +177,12 @@ trap cleanup EXIT INT TERM
 
 get_universe_tickers() {
     case "$1" in
-        tech18)      echo "$UNIVERSE_TECH18" ;;
-        mag7)        echo "$UNIVERSE_MAG7" ;;
-        balanced15)  echo "$UNIVERSE_BALANCED15" ;;
+        tech18)        echo "$UNIVERSE_TECH18" ;;
+        mag7)          echo "$UNIVERSE_MAG7" ;;
+        balanced15)    echo "$UNIVERSE_BALANCED15" ;;
+        sp30)          echo "$UNIVERSE_SP30" ;;
+        diversified40) echo "$UNIVERSE_DIVERSIFIED40" ;;
+        volatile25)    echo "$UNIVERSE_VOLATILE25" ;;
         *) echo "ERROR: unknown universe tag '$1'" >&2; exit 1 ;;
     esac
 }
@@ -181,7 +196,7 @@ echo "=========================================="
 echo "ReAct CROSS-COMPARISON"
 echo "=========================================="
 echo "Models:         qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-FP8)"
-echo "Universes:      ${UNIVERSE_TAGS[*]}"
+echo "Universes (6):  ${UNIVERSE_TAGS[*]}"
 echo "Scripts:        qwen_port  noharness  yesharnessgpt"
 echo "Start:          ${START_DATE}"
 echo "End:            ${END_DATE}"
