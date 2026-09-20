@@ -5,26 +5,26 @@
 #SBATCH --output=log/ace_only_%j.out
 #SBATCH --error=log/ace_only_%j.out
 #SBATCH --job-name=AceOnly
-#SBATCH --gres=gpu:a100:2
+#SBATCH --gres=gpu:a100:4
 #SBATCH --partition=mhong
 
 set -euo pipefail
 
 # ============================================================
-# ACE-ONLY RUN — re-runs only the three ACE systems so you can
-# iterate on memory / Debater / dual without re-running the
-# ReAct baselines (which are slow and already stable).
+# ACE-ONLY RUN — re-runs only the ACE systems so you can
+# iterate on memory / Debater / dual / AdaReMo without
+# re-running the ReAct baselines (which are slow and stable).
 #
 # Two tags:
 #   ACE_RUN_TAG    — names the new ace_results_<tag>/ and
 #                    summary_<tag>/ directories for THIS run
 #   REACT_RUN_TAG  — points at the existing ReAct results
-#                    directory to use in the final summary
+#                    directory to reuse in the final summary
 #                    (set this to whichever previous run tag
 #                    has good ReAct results, e.g. "2" or "fixed")
 # ============================================================
-ACE_RUN_TAG="ace_fixed"   # <-- change between ACE-only submissions
-REACT_RUN_TAG="2"         # <-- tag of the existing ReAct results to reuse
+ACE_RUN_TAG="ace_v1"      # <-- change between ACE-only submissions
+REACT_RUN_TAG="fixed"     # <-- tag of the existing ReAct results to reuse
 
 
 # ============================================================
@@ -180,8 +180,8 @@ get_tickers() {
 echo "=========================================="
 echo "ACE-ONLY RUN  [ace: ${ACE_RUN_TAG}  react: ${REACT_RUN_TAG}]"
 echo "=========================================="
-echo "Systems:    HARNESS+MEMORY+DEBATER (dual_permanent)  |  +AdaReMo"
-echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B-FP8)"
+echo "Systems:    HARNESS+DEBATER  HARNESS+MEMORY  HARNESS+MEMORY+DEBATER"
+echo "Models:     qwen25 (Qwen2.5-32B-AWQ)  |  qwen36 (Qwen3.6-35B-A3B)"
 echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
 echo "Capital:    \$${INITIAL_CAPITAL}  |  Fees: 15 bps  |  Rebalance: monthly"
@@ -213,16 +213,21 @@ for MODEL_VERSION in qwen25 qwen36; do
             --tool-call-parser hermes
         )
     else
-        MODEL="Qwen/Qwen3.6-35B-A3B-FP8"
+        MODEL="Qwen/Qwen3.6-35B-A3B"
         MODEL_TAG="36"
         VLLM_ARGS=(
             --model "$MODEL"
             --host 127.0.0.1
             --port "$VLLM_PORT"
-            --tensor-parallel-size 2
+            --tensor-parallel-size 4
             --max-model-len 16384
             --gpu-memory-utilization 0.90
             --enable-chunked-prefill
+            --language-model-only
+            --reasoning-parser qwen3
+            --enable-auto-tool-choice
+            --tool-call-parser qwen3_coder
+            --generation-config vllm
         )
     fi
 
@@ -253,24 +258,13 @@ for MODEL_VERSION in qwen25 qwen36; do
         echo "=========================================="
 
         echo ""
-        echo "--- ACE: HARNESS+MEMORY+DEBATER (dual_permanent) ---"
+        echo "--- ACE: HARNESS+DEBATER / HARNESS+MEMORY / HARNESS+MEMORY+DEBATER ---"
         cd "$ROOT_DIR"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
             --start   "$START_DATE" \
             --end     "$END_DATE" \
-            --systems dual_permanent \
-            --output_dir "$ACE_DIR" \
-            --risk_harness_type conviction \
-            --initial_capital "$INITIAL_CAPITAL" \
-            --rebalance-days  "$REBALANCE_DAYS"
-
-        echo ""
-        echo "--- ACE+AdaReMo: HARNESS+MEMORY+DEBATER+REWARD_MODEL ---"
-        python -m ace_harness.run_monthly_adamo \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
+            --systems intra memory_only dual_permanent \
             --output_dir "$ACE_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
@@ -293,7 +287,7 @@ done
 
 echo ""
 echo "=========================================="
-echo "Generating ACE plots..."
+echo "Generating per-universe ACE plots..."
 echo "=========================================="
 
 for MODEL_TAG in 25 36; do
