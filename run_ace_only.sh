@@ -52,6 +52,8 @@ fi
 
 export HF_HOME="$HOME/hf_cache"
 export VLLM_USE_FLASHINFER_SAMPLER=0
+# Qwen3.6 torch.compile + warmup can exceed vLLM's default 600s engine-ready timeout.
+export VLLM_ENGINE_READY_TIMEOUT_S=1800
 
 
 # ============================================================
@@ -87,20 +89,32 @@ VLLM_PID=""
 # ============================================================
 
 clear_port() {
-    local pids
+    local pids waited
     pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
     if [ -n "$pids" ]; then
         echo "WARNING: Port ${VLLM_PORT} in use (${pids}). Killing..."
         # shellcheck disable=SC2086
         kill -TERM $pids 2>/dev/null || true
-        sleep 5
+        sleep 10
         pids=$(lsof -ti :"${VLLM_PORT}" 2>/dev/null || true)
         if [ -n "$pids" ]; then
             # shellcheck disable=SC2086
             kill -9 $pids 2>/dev/null || true
-            sleep 3
+            sleep 5
         fi
     fi
+    # Wait until port is actually free before returning.
+    waited=0
+    while lsof -ti :"${VLLM_PORT}" > /dev/null 2>&1; do
+        sleep 2
+        waited=$(( waited + 2 ))
+        if [ "$waited" -ge 30 ]; then
+            echo "WARNING: Port ${VLLM_PORT} still occupied after ${waited}s — forcing kill."
+            lsof -ti :"${VLLM_PORT}" | xargs kill -9 2>/dev/null || true
+            sleep 3
+            break
+        fi
+    done
 }
 
 start_vllm() {
