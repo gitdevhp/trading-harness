@@ -14,7 +14,10 @@ set -euo pipefail
 # HARNESS + ReMo RUN
 #
 # Runs HARNESS+REMO (plain reward model, raw returns) for both
-# models across all universes and produces per-universe plots.
+# models across all universes and produces per-universe plots,
+# then writes a full aggregate summary (JSON + ASCII table +
+# comparison charts) to summary_remo_<tag>/ for easy import
+# into spreadsheets.
 # Resumable: universes with existing *.json output are skipped.
 #
 #   System: HARNESS+REMO — run_monthly_baseline_remo
@@ -23,9 +26,12 @@ set -euo pipefail
 #     qwen25 — Qwen2.5-32B-Instruct-AWQ  (TP=1, 1×A100)
 #     qwen36 — Qwen3.6-35B-A3B           (TP=4, 4×A100)
 #
-#   RUN_TAG — names remo_results_<tag>/ directory
+#   RUN_TAG       — names remo_results_<tag>/ and summary_remo_<tag>/
+#   REACT_RUN_TAG — tag of existing ReAct results to include in the
+#                   summary (e.g. "fixed"); leave empty if none exist
 # ============================================================
 RUN_TAG="remo_v1"   # <-- change between submissions
+REACT_RUN_TAG=""    # <-- set to a ReAct results tag to include in summary, or leave empty
 
 
 # ============================================================
@@ -195,6 +201,8 @@ echo "Universes:  ${UNIVERSE_TAGS[*]}"
 echo "Period:     ${START_DATE} -> ${END_DATE}"
 echo "Capital:    \$${INITIAL_CAPITAL}  |  Fees: 15 bps  |  Rebalance: monthly"
 echo "Results:    ${ROOT_DIR}/remo_results_${RUN_TAG}/"
+echo "Summary:    ${ROOT_DIR}/summary_remo_${RUN_TAG}/"
+echo "ReAct in:   ${REACT_RUN_TAG:-(none — ReAct systems will show as MISSING in summary)}"
 echo "=========================================="
 echo ""
 
@@ -342,6 +350,41 @@ done
 
 
 # ============================================================
+# FINAL AGGREGATE SUMMARY
+# Combines ReMo results with any existing ReAct results, computes
+# quantitative baselines, and writes full_comparison.json + .txt
+# for easy import into spreadsheets.
+# ============================================================
+
+echo ""
+echo "=========================================="
+echo "Building full aggregate summary..."
+echo "=========================================="
+
+SUMMARY_DIR="${ROOT_DIR}/summary_remo_${RUN_TAG}"
+mkdir -p "$SUMMARY_DIR"
+
+# Resolve the ReAct results directory — use provided tag or fall back to a
+# path that does not exist so summarize_full_run skips it gracefully.
+if [ -n "$REACT_RUN_TAG" ]; then
+    REACT_RESULTS_DIR="${REACT_DIR}/results_${REACT_RUN_TAG}"
+else
+    REACT_RESULTS_DIR="${REACT_DIR}/results_none"
+fi
+
+cd "$ROOT_DIR"
+python -m ace_harness.summarize_full_run \
+    --react_dir     "${REACT_RESULTS_DIR}" \
+    --ace_base      "${ROOT_DIR}/remo_results_${RUN_TAG}" \
+    --output_dir    "$SUMMARY_DIR" \
+    --model_tags    25 36 \
+    --universe_tags tech18 mag7 balanced15 sp30 diversified40 volatile25
+
+echo ""
+echo "Full summary -> ${SUMMARY_DIR}/"
+
+
+# ============================================================
 # FINAL FILE LISTING
 # ============================================================
 
@@ -354,5 +397,9 @@ echo "Capital: \$${INITIAL_CAPITAL}  |  Fees: 15 bps"
 echo ""
 echo "Result directories (remo_results_${RUN_TAG}/):"
 ls -lhd "${ROOT_DIR}/remo_results_${RUN_TAG}"/qwen*/ 2>/dev/null | awk '{print "  "$NF}' \
+    || echo "  (none)"
+echo ""
+echo "Summary files (${SUMMARY_DIR}/):"
+ls -lh "${SUMMARY_DIR}/" 2>/dev/null | awk '{print "  "$NF, $5}' \
     || echo "  (none)"
 echo "=========================================="
