@@ -70,6 +70,7 @@ def make_baseline(universe, solver):
 
 
 def make_intra_task(universe, solver, debater, max_rounds: int = 3):
+    n_stocks = len(universe.tickers)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         screener = universe.get_market_screener(current_date)
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
@@ -81,7 +82,8 @@ def make_intra_task(universe, solver, debater, max_rounds: int = 3):
         for r in range(1, max_rounds + 1):
             raw_alloc, trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                               feedback_text=feedback, direction=direction)
-            review = debater.intra_task_review(current_date, screener, status_text, raw_alloc, round_num=r)
+            review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
+                                               round_num=r, n_universe_stocks=n_stocks)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
             if review["verdict"] == "accept":
                 break
@@ -151,6 +153,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
     a quantitative knob should move on evidence, not on a single
     unverified round of argument.
     """
+    n_stocks = len(universe.tickers)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         past_dates = sorted(decision_log.keys())
         if past_dates:
@@ -189,7 +192,8 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
                                               playbook_text=playbook_text, feedback_text=feedback,
                                               direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
-                                                playbook_text=playbook_text, round_num=r)
+                                                playbook_text=playbook_text, round_num=r,
+                                                n_universe_stocks=n_stocks)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
             all_lessons.extend(review.get("lessons", []))
             if review["verdict"] == "accept":
@@ -305,6 +309,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
     the post-task reflection on the PREVIOUS task's realized outcome feed
     the Consolidator, and nothing is ever cleared.
     """
+    n_stocks = len(universe.tickers)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         # slow loop: reflect on the previous task's realized outcome first
         past_dates = sorted(decision_log.keys())
@@ -341,7 +346,8 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                    playbook_text=playbook_text)
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
-                                            playbook_text=playbook_text, round_num=1)
+                                            playbook_text=playbook_text, round_num=1,
+                                            n_universe_stocks=n_stocks)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
 
         all_lessons = list(review.get("lessons", []))

@@ -324,16 +324,34 @@ class Debater:
         self.model = model
 
     def intra_task_review(self, current_date, screener_text, portfolio_status_text,
-                           proposed_allocations, playbook_text=None, round_num=1):
+                           proposed_allocations, playbook_text=None, round_num=1,
+                           n_universe_stocks=None):
         memory_block = f"\n\nExperience memory context:\n{playbook_text}\n" if playbook_text else ""
+
+        # Scale what "large" means to the universe — equal weight defines the floor.
+        if n_universe_stocks and n_universe_stocks > 0:
+            eq_wt = round(100.0 / n_universe_stocks, 1)
+            large_threshold = round(2.5 * eq_wt, 1)
+            sizing_context = (
+                f"\nUniverse size: {n_universe_stocks} stocks. "
+                f"Equal-weight baseline = {eq_wt:.1f}% per stock. "
+                f"Only challenge a position when it deviates meaningfully from this baseline — "
+                f"a 'large' position for this universe means >{large_threshold:.1f}% (2.5× equal weight). "
+                f"Positions near equal weight are NORMAL here and must not be challenged "
+                f"without a specific negative screener signal."
+            )
+        else:
+            sizing_context = ""
+
         system_prompt = f"""You are a portfolio Debater pressure-testing a proposal BEFORE execution (round {round_num}). Your job is to check whether the SIZING matches the evidence — not to reflexively push toward caution.
 You must be willing to argue in EITHER direction, based only on what the screener actually shows:
 - Argue for MORE conviction / a LARGER position when an asset shows strong, aligned signals (e.g. positive momentum across multiple windows, price above both 50d and 200d SMA, healthy breadth) but the proposal sizes it small or excludes it — being needlessly cautious in the face of a strong signal is a real error, not a safe default.
 - Argue for LESS conviction / a SMALLER position or more diversification when a position is large relative to weak, mixed, or contradictory signals, or when turnover looks excessive given trading fees.
 - Concede ("accept") when the sizing is actually proportionate to the strength of the evidence, in either direction.
 You do NOT know future prices — never argue from hindsight, only from what's in the screener right now.
-IMPORTANT: A risk harness (volatility targeting, position caps, drawdown limits) is applied AFTER this proposal is finalized. It already handles generic risk guardrails. Your job is NOT to fine-tune position sizes out of general caution — it is to catch SIGNAL MISREADS: wrong direction on an asset, a missed strong signal that was priced out, or a large position with directly contradictory screener metrics. If the sizing looks reasonable given the signals, concede.
+IMPORTANT: A risk harness (volatility targeting, position caps, drawdown limits) is applied AFTER this proposal is finalized. It already handles generic risk guardrails. Your role is SIGNAL MISREAD detection only: wrong direction on an asset, a missed strong signal that was priced out, or a large position with directly contradictory screener metrics. If the sizing looks reasonable given the signals, concede.
 If you argue "decrease_risk", you MUST cite the SPECIFIC screener metric and value that directly contradicts the proposed position (e.g. "6M-Mom is -8% yet allocated 20%"). Without a named, checkable metric that contradicts the sizing, verdict must be "accept".
+{sizing_context}
 {memory_block}
 Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
 {_LESSON_QUALITY_BAR}
