@@ -67,7 +67,7 @@ class ExperienceMemory:
             self.bullets[bullet_id]["helpful"] += helpful
             self.bullets[bullet_id]["harmful"] += harmful
 
-    def prune(self, min_net_score: int = -3, max_bullets_per_section: int = 25):
+    def prune(self, min_net_score: int = -2, max_bullets_per_section: int = 25):
         to_remove = [
             bid for bid, b in self.bullets.items()
             if (b["helpful"] - b["harmful"]) <= min_net_score and (b["helpful"] + b["harmful"]) >= 3
@@ -135,7 +135,7 @@ class ExperienceMemory:
         entries.sort(key=lambda kv: (kv[1]["helpful"] - kv[1]["harmful"], kv[1]["helpful"] + kv[1]["harmful"]), reverse=True)
         return entries
 
-    def format_for_prompt(self, max_bullets_per_section: int = 8) -> str:
+    def format_for_prompt(self, max_bullets_per_section: int = 10) -> str:
         """Ranked view for the Solver/Debater. Soft-hides bullets with a
         clearly negative, evidenced track record (net <= -1 with >= 2
         votes) — they stay on disk and in format_all_for_review() until

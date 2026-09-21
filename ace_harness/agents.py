@@ -442,14 +442,14 @@ Sections available: {sections}
 "CONVICTION SIGNALS" is for lessons about when the evidence justified sizing UP or concentrating — it is NOT a lesser section than "RISK LESSONS" or "MISTAKES TO AVOID". Do not systematically favor caution-flavored lessons over conviction-flavored ones; weigh each purely by the specificity and strength of its evidence. A playbook that only ever grows more conservative is a curation failure, not a safe default.
 You see the FULL existing playbook below, including bullets already marked harmful, and NEW candidate lessons, each with a confidence rating.
 
-Rules:
-- A "low" confidence lesson may only REINFORCE or CONTRADICT an existing bullet (an "update" op) — it must never spawn a brand new bullet by itself.
-- A "high" or "medium" confidence lesson may spawn a new bullet, but ONLY if nothing existing already captures it, AND ONLY if it names a specific threshold, metric, or condition (a screener field, a percentage, a named regime) — not a platitude that's true in almost any month. "Avoid volatile assets", "diversify", "reassess regularly", or "limit position size" with no number attached do NOT qualify for "add"; route them to "update" on an existing bullet instead, or drop them.
-- Lesson duplicates/reinforces an existing bullet -> {{"op": "update", "id": "<id>", "helpful": 1}}
-- Lesson contradicts / is disproven by an existing bullet -> {{"op": "update", "id": "<id>", "harmful": 1}}
-- Lesson clearly generalizes or sharpens an existing bullet's wording (same idea, better phrasing, or adds the missing number) -> {{"op": "replace", "id": "<id>", "content": "<improved, more specific wording>"}}
-- Two existing bullets now say nearly the same thing (even worded differently) -> merge them: {{"op": "replace", "id": "<the stronger one>", "content": "<merged, more specific wording>"}} and {{"op": "remove", "id": "<the weaker one>"}}. Check for this actively — don't wait for a lesson to point it out.
-- Genuinely new, non-duplicate, high/medium-confidence, condition-specific lesson -> {{"op": "add", "section": "<one of the sections above>", "content": "<concise rule that names a specific threshold or metric>"}}
+Rules (apply in this exact order):
+1. MERGE FIRST — before reading the new lessons, scan ALL pairs of existing bullets for near-duplicates (same idea, different wording). For every such pair: {{"op": "replace", "id": "<the higher net-score one>", "content": "<merged, sharper wording that keeps both specifics>"}} and {{"op": "remove", "id": "<the lower net-score one>"}}. A compact playbook with fewer, stronger bullets always beats a long one with redundant ones.
+2. A "low" confidence lesson may only REINFORCE or CONTRADICT an existing bullet (an "update" op) — it must never spawn a brand new bullet by itself.
+3. A "high" or "medium" confidence lesson may spawn a new bullet, but ONLY if nothing existing already captures it, AND ONLY if it names a specific threshold, metric, or condition (a screener field, a percentage, a named regime) — not a platitude that's true in almost any month. "Avoid volatile assets", "diversify", "reassess regularly", or "limit position size" with no number attached do NOT qualify for "add"; route them to "update" on an existing bullet instead, or drop them.
+4. Lesson duplicates/reinforces an existing bullet -> {{"op": "update", "id": "<id>", "helpful": 1}}
+5. Lesson contradicts / is disproven by an existing bullet -> {{"op": "update", "id": "<id>", "harmful": 1}}
+6. Lesson clearly generalizes or sharpens an existing bullet's wording (same idea, better phrasing, or adds the missing number) -> {{"op": "replace", "id": "<id>", "content": "<improved, more specific wording>"}}
+7. Genuinely new, non-duplicate, high/medium-confidence, condition-specific lesson -> {{"op": "add", "section": "<one of the sections above>", "content": "<concise rule that names a specific threshold or metric>"}}
 
 Respond ONLY with a JSON array of at most 8 ops, no other text."""
         user_prompt = f"Full existing playbook:\n{existing}\n\nNew candidate lessons:\n{json.dumps(lessons)}"
