@@ -217,6 +217,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
 
 
 def make_dual_session(universe, solver, debater, consolidator, max_rounds: int = 5, risk_harness=None):
+    n_stocks = len(universe.tickers)
     """SYSTEM A — session-scoped dual-timescale.
 
     Many debate rounds happen within a single task: each round's lessons
@@ -248,7 +249,8 @@ def make_dual_session(universe, solver, debater, consolidator, max_rounds: int =
                                               playbook_text=playbook_text, feedback_text=feedback,
                                               direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
-                                                playbook_text=playbook_text, round_num=r)
+                                                playbook_text=playbook_text, round_num=r,
+                                                n_universe_stocks=n_stocks)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
 
             ops = consolidator.consolidate(session_memory, review.get("lessons", []), session_memory.sections)
@@ -472,6 +474,7 @@ def make_baseline_remo(universe, solver, reward_model, risk_harness=None):
 
 def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, memory_path,
                                reward_model, risk_harness=None, risk_tuner=None, risk_params_path=None):
+    n_stocks = len(universe.tickers)
     """dual_permanent + AdaReMo: identical flow to make_dual_permanent, with one
     addition — after each period the AdaptiveRewardModel is updated with the
     previous allocation and its realized weighted return, then its signal (a
@@ -531,7 +534,8 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
         first_alloc, first_trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                                    playbook_text=combined_context)
         review = debater.intra_task_review(current_date, screener, status_text, first_alloc,
-                                            playbook_text=playbook_text, round_num=1)
+                                            playbook_text=playbook_text, round_num=1,
+                                            n_universe_stocks=n_stocks)
         rounds_log = [{"round": 1, "allocations": first_alloc, "review": review}]
         all_lessons = list(review.get("lessons", []))
 
