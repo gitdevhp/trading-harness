@@ -5,21 +5,84 @@ analyze_regime.py — Tests the concentration hypothesis:
   DEBATER delta (vs HARNESS) correlates with universe concentration.
   MEMORY delta  (vs HARNESS) correlates with universe breadth.
 
-Uses hardcoded experimental results (ablation runs, qwen25 only).
 Outputs:
   - Console table: universe stats + deltas + which component wins
   - Pearson r for each hypothesis
   - Scatter plot: concentration_score vs delta for DEBATER and MEMORY
   - "Oracle gain" — how much an ideal adaptive router would add vs fixed HARNESS
 
-Usage:
+Usage (hardcoded data):
   python -m ace_harness.analyze_regime [--output_dir PATH]
+
+Usage (auto-load from ablation run directory):
+  python -m ace_harness.analyze_regime --ablation_dir ace_ablation_<JOB_ID>/ [--output_dir PATH]
+
+  The ablation_dir must follow the structure produced by run_ace_ablation_qwen25.sh:
+    <ablation_dir>/<universe_tag>/debater/*_results.json
+    <ablation_dir>/<universe_tag>/memory/*_results.json
+    <ablation_dir>/<universe_tag>/ace/*_results.json
+  Any missing file falls back to the hardcoded value.
 """
 
 import argparse
+import glob
 import math
 import json
 import os
+
+# ──────────────────────────────────────────────────────────────
+# AUTO-LOAD from ablation directory
+# ──────────────────────────────────────────────────────────────
+
+def _total_return_from_file(path):
+    """Return TotalRet% from a single *_results.json file, or None on error."""
+    try:
+        import numpy as np
+        with open(path) as f:
+            data = json.load(f)
+        records = data if isinstance(data, list) else data.get("daily_nav", data.get("results", []))
+        if not records:
+            return None
+        values = [r["portfolio_value"] for r in records if "portfolio_value" in r]
+        if len(values) < 2 or values[0] <= 0:
+            return None
+        return round((values[-1] / values[0] - 1) * 100, 2)
+    except Exception as e:
+        print(f"  Warning: could not load {path}: {e}")
+        return None
+
+
+def _load_from_ablation_dir(ablation_dir, universe_tag):
+    """
+    For a given universe, look for result files in:
+      <ablation_dir>/<universe_tag>/debater/*_results.json  -> harness_debater
+      <ablation_dir>/<universe_tag>/memory/*_results.json   -> harness_memory
+      <ablation_dir>/<universe_tag>/ace/*_results.json      -> ace_runs (list)
+    Returns a dict with whichever keys were found (others must come from hardcoded data).
+    """
+    result = {}
+    base = os.path.join(ablation_dir, universe_tag)
+
+    for subdir, key in [("debater", "harness_debater"), ("memory", "harness_memory")]:
+        files = sorted(glob.glob(os.path.join(base, subdir, "*_results.json")))
+        if files:
+            val = _total_return_from_file(files[0])
+            if val is not None:
+                result[key] = val
+                print(f"  [{universe_tag}/{subdir}] loaded {val:.2f}% from {os.path.basename(files[0])}")
+
+    ace_files = sorted(glob.glob(os.path.join(base, "ace", "*_results.json")))
+    ace_runs = []
+    for f in ace_files:
+        val = _total_return_from_file(f)
+        if val is not None:
+            ace_runs.append(val)
+            print(f"  [{universe_tag}/ace] loaded {val:.2f}% from {os.path.basename(f)}")
+    if ace_runs:
+        result["ace_runs"] = ace_runs
+
+    return result
+
 
 # ──────────────────────────────────────────────────────────────
 # EXPERIMENTAL DATA  (qwen25, ablation runs 1 & 2 — shared values)
@@ -124,9 +187,20 @@ def pearson_r(xs, ys):
     return num / denom if denom else 0.0
 
 
-def run(output_dir: str | None = None):
-    rows = []
+def run(output_dir: str | None = None, ablation_dir: str | None = None):
+    # Merge fresh ablation results on top of hardcoded fallbacks
+    universe_data = {}
     for name, data in UNIVERSES.items():
+        merged = dict(data)
+        if ablation_dir:
+            loaded = _load_from_ablation_dir(ablation_dir, name)
+            merged.update(loaded)
+        universe_data[name] = merged
+    if ablation_dir:
+        print()  # blank line after load messages
+
+    rows = []
+    for name, data in universe_data.items():
         n = len(data["tickers"])
         conc = concentration_score(data)
         h = data["harness"]
@@ -309,5 +383,9 @@ def _plot(rows, hhis, debater_deltas, memory_deltas, output_dir):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Regime concentration hypothesis analysis")
     parser.add_argument("--output_dir", default=None, help="Directory to save JSON + PNG")
+    parser.add_argument("--ablation_dir", default=None,
+                        help="Root of a run_ace_ablation_qwen25.sh output directory; "
+                             "auto-loads debater/memory/ace TotalRet%% per universe, "
+                             "falling back to hardcoded values for any missing file")
     args = parser.parse_args()
-    run(output_dir=args.output_dir)
+    run(output_dir=args.output_dir, ablation_dir=args.ablation_dir)

@@ -212,7 +212,9 @@ echo ""
 echo "=========================================="
 echo "Running regime concentration analysis..."
 echo "=========================================="
-python -m ace_harness.analyze_regime --output_dir "${OUT_ROOT}/regime_analysis" || true
+python -m ace_harness.analyze_regime \
+    --ablation_dir "${OUT_ROOT}" \
+    --output_dir "${OUT_ROOT}/regime_analysis" || true
 
 echo ""
 echo "=========================================="
