@@ -70,7 +70,7 @@ def make_baseline(universe, solver):
 
 
 def make_intra_task(universe, solver, debater, max_rounds: int = 3):
-    n_stocks = len(universe.tickers)
+    n_stocks = len(universe.raw_universe)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         screener = universe.get_market_screener(current_date)
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
@@ -153,7 +153,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
     a quantitative knob should move on evidence, not on a single
     unverified round of argument.
     """
-    n_stocks = len(universe.tickers)
+    n_stocks = len(universe.raw_universe)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         past_dates = sorted(decision_log.keys())
         if past_dates:
@@ -217,7 +217,7 @@ def make_dual_timescale(universe, solver, debater, consolidator, memory, memory_
 
 
 def make_dual_session(universe, solver, debater, consolidator, max_rounds: int = 5, risk_harness=None):
-    n_stocks = len(universe.tickers)
+    n_stocks = len(universe.raw_universe)
     """SYSTEM A — session-scoped dual-timescale.
 
     Many debate rounds happen within a single task: each round's lessons
@@ -311,7 +311,7 @@ def make_dual_permanent(universe, solver, debater, consolidator, memory, memory_
     the post-task reflection on the PREVIOUS task's realized outcome feed
     the Consolidator, and nothing is ever cleared.
     """
-    n_stocks = len(universe.tickers)
+    n_stocks = len(universe.raw_universe)
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         # slow loop: reflect on the previous task's realized outcome first
         past_dates = sorted(decision_log.keys())
@@ -474,7 +474,7 @@ def make_baseline_remo(universe, solver, reward_model, risk_harness=None):
 
 def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, memory_path,
                                reward_model, risk_harness=None, risk_tuner=None, risk_params_path=None):
-    n_stocks = len(universe.tickers)
+    n_stocks = len(universe.raw_universe)
     """dual_permanent + AdaReMo: identical flow to make_dual_permanent, with one
     addition — after each period the AdaptiveRewardModel is updated with the
     previous allocation and its realized weighted return, then its signal (a
