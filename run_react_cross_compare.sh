@@ -211,6 +211,14 @@ echo ""
 
 # ============================================================
 # MAIN LOOP — iterate over models, then universes
+#
+# Three resume levels:
+#   1. Model-level  — if every universe output exists for this
+#                     model, vLLM is never started; model skipped.
+#   2. Universe-level — if all 3 output files exist for a
+#                       (model, universe) pair, that group is skipped.
+#   3. Step-level   — if an individual output file already exists,
+#                     that script is skipped; the other two still run.
 # ============================================================
 
 for MODEL_VERSION in qwen25 qwen36; do
@@ -250,6 +258,22 @@ for MODEL_VERSION in qwen25 qwen36; do
 
     export REACT_MODEL="$MODEL"
 
+    # ── Level 1: skip model entirely if all outputs already exist ──
+    _all_done=true
+    for _ut in "${UNIVERSE_TAGS[@]}"; do
+        if [[ ! -f "results/qwen_raw_${MODEL_TAG}_${_ut}.json"         || \
+              ! -f "results/react_no_harness_${MODEL_TAG}_${_ut}.json"  || \
+              ! -f "results/react_gpt_harness_${MODEL_TAG}_${_ut}.json" ]]; then
+            _all_done=false
+            break
+        fi
+    done
+    if $_all_done; then
+        echo ""
+        echo "SKIP MODEL qwen${MODEL_TAG}: all universe outputs already exist."
+        continue
+    fi
+
     echo "=========================================="
     echo "MODEL: ${MODEL}  (tag: qwen${MODEL_TAG})"
     echo "=========================================="
@@ -264,47 +288,68 @@ for MODEL_VERSION in qwen25 qwen36; do
         NOHARN_OUT="results/react_no_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
         GPT_OUT="results/react_gpt_harness_${MODEL_TAG}_${UNIVERSE_TAG}.json"
 
+        # ── Level 2: skip universe if all 3 outputs exist ──
+        if [[ -f "$RAW_OUT" && -f "$NOHARN_OUT" && -f "$GPT_OUT" ]]; then
+            echo ""
+            echo "SKIP: qwen${MODEL_TAG}/${UNIVERSE_TAG} — all 3 outputs exist."
+            continue
+        fi
+
         echo ""
         echo "==========================================";
         echo "Universe: ${UNIVERSE_TAG}  |  Model: qwen${MODEL_TAG}"
         echo "Tickers:  ${TICKERS}"
         echo "=========================================="
 
-        echo ""
-        echo "--- Step 1/3: Raw Qwen ---"
-        python qwen_port.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      "$WARMUP_DAYS" \
-            --output  "$RAW_OUT"
-        echo "Raw Qwen done → ${RAW_OUT}"
+        # ── Level 3: step-level skips ──
 
-        echo ""
-        echo "--- Step 2/3: ReAct No Harness ---"
-        python noharness.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      "$WARMUP_DAYS" \
-            --output  "$NOHARN_OUT"
-        echo "ReAct No Harness done → ${NOHARN_OUT}"
+        if [[ -f "$RAW_OUT" ]]; then
+            echo "SKIP step 1/3 (exists): ${RAW_OUT}"
+        else
+            echo ""
+            echo "--- Step 1/3: Raw Qwen ---"
+            python qwen_port.py \
+                --tickers "${TICKER_ARRAY[@]}" \
+                --start   "$START_DATE" \
+                --end     "$END_DATE" \
+                --initial-capital  "$INITIAL_CAPITAL" \
+                --rebalance-days   "$REBALANCE_DAYS" \
+                --warmup-days      "$WARMUP_DAYS" \
+                --output  "$RAW_OUT"
+            echo "Raw Qwen done → ${RAW_OUT}"
+        fi
 
-        echo ""
-        echo "--- Step 3/3: ReAct + GPT Harness ---"
-        python yesharnessgpt.py \
-            --tickers "${TICKER_ARRAY[@]}" \
-            --start   "$START_DATE" \
-            --end     "$END_DATE" \
-            --initial-capital  "$INITIAL_CAPITAL" \
-            --rebalance-days   "$REBALANCE_DAYS" \
-            --warmup-days      "$WARMUP_DAYS" \
-            --output  "$GPT_OUT"
-        echo "ReAct + GPT Harness done → ${GPT_OUT}"
+        if [[ -f "$NOHARN_OUT" ]]; then
+            echo "SKIP step 2/3 (exists): ${NOHARN_OUT}"
+        else
+            echo ""
+            echo "--- Step 2/3: ReAct No Harness ---"
+            python noharness.py \
+                --tickers "${TICKER_ARRAY[@]}" \
+                --start   "$START_DATE" \
+                --end     "$END_DATE" \
+                --initial-capital  "$INITIAL_CAPITAL" \
+                --rebalance-days   "$REBALANCE_DAYS" \
+                --warmup-days      "$WARMUP_DAYS" \
+                --output  "$NOHARN_OUT"
+            echo "ReAct No Harness done → ${NOHARN_OUT}"
+        fi
+
+        if [[ -f "$GPT_OUT" ]]; then
+            echo "SKIP step 3/3 (exists): ${GPT_OUT}"
+        else
+            echo ""
+            echo "--- Step 3/3: ReAct + GPT Harness ---"
+            python yesharnessgpt.py \
+                --tickers "${TICKER_ARRAY[@]}" \
+                --start   "$START_DATE" \
+                --end     "$END_DATE" \
+                --initial-capital  "$INITIAL_CAPITAL" \
+                --rebalance-days   "$REBALANCE_DAYS" \
+                --warmup-days      "$WARMUP_DAYS" \
+                --output  "$GPT_OUT"
+            echo "ReAct + GPT Harness done → ${GPT_OUT}"
+        fi
 
         echo ""
         echo "Universe ${UNIVERSE_TAG} / qwen${MODEL_TAG} complete."
