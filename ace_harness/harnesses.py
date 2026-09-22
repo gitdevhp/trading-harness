@@ -676,11 +676,20 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
             feedback = review["feedback"]
             direction = review.get("direction")
 
-        print(f"[autogov]   result: admitted={admitted}  g_sto={g_sto}  frozen={_frozen[0]}")
+        # Distinguish "K rounds exhausted" (solver couldn't satisfy debater in max_rounds)
+        # from "early exit" (g_ref=False: critic gave up, no actionable lessons).
+        # When exhausted with g_sto=True, lessons are still valid — consolidate them.
+        g_exhausted = not admitted and g_ref  # only True when loop ran to max_rounds
 
-        # --- CONSOLIDATION gate (Algorithm 2 line 11) -------------------------
+        print(f"[autogov]   result: admitted={admitted}  g_sto={g_sto}  frozen={_frozen[0]}  g_exhausted={g_exhausted}")
+
+        # --- CONSOLIDATION gate (Algorithm 2 line 11, extended) ---------------
+        # Original: admitted AND g_sto AND NOT frozen
+        # Extended: also consolidate when K rounds exhausted with g_sto=True —
+        # the debater identified real lessons even if the solver couldn't fully
+        # satisfy the request within K rounds.
         consolidated = False
-        if admitted and g_sto and not _frozen[0]:
+        if (admitted or g_exhausted) and g_sto and not _frozen[0]:
             ops = consolidator.consolidate(memory, all_lessons, memory.sections)
             memory.apply_delta_ops(ops)
             consolidated = True
@@ -692,6 +701,7 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
             "rounds": rounds_log,
             "playbook_snapshot": playbook_text,
             "admitted": admitted,
+            "g_exhausted": g_exhausted,
             "consolidated": consolidated,
             "memory_size": len(memory.bullets),
         }
