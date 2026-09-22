@@ -120,14 +120,20 @@ class ExperienceMemory:
         Never fires until at least `window` consolidations have happened, so
         early tasks always write their lessons; this matches the paper's
         observation that SATURATED "never fired" within their task streams.
+
+        Only consolidation calls made with track_saturation=True (the default,
+        used by the fast/intra-task loop) count toward this window. Slow-loop
+        inter-task consolidations pass track_saturation=False so realized-outcome
+        learning doesn't pollute the fast-loop saturation signal.
         """
-        if len(self._consolidation_sizes) < window:
+        # Need window+1 entries to measure growth across exactly window intervals.
+        if len(self._consolidation_sizes) < window + 1:
             return False
-        oldest = self._consolidation_sizes[-window]
+        oldest = self._consolidation_sizes[-(window + 1)]
         current = len(self.bullets)
         return (current - oldest) < min_growth
 
-    def apply_delta_ops(self, ops):
+    def apply_delta_ops(self, ops, track_saturation: bool = True):
         """ops: list of dicts, one of
             {"op": "add", "section": str, "content": str}
             {"op": "update", "id": str, "helpful": int, "harmful": int}
@@ -136,6 +142,10 @@ class ExperienceMemory:
         Capped at MAX_OPS_PER_CALL regardless of what's passed. Malformed
         ops are silently skipped so a flaky LLM response never crashes
         the backtest.
+
+        track_saturation: pass False from slow/inter-task loops so their
+        consolidation calls don't count toward SATURATED(M). The saturation
+        signal should only reflect fast-loop (admitted AND g_sto) consolidations.
         """
         for op in (ops or [])[:MAX_OPS_PER_CALL]:
             kind = op.get("op") if isinstance(op, dict) else None
@@ -150,8 +160,9 @@ class ExperienceMemory:
             elif kind == "remove":
                 self.bullets.pop(op.get("id", ""), None)
         self.prune()
-        # Record bullet count after this consolidation for SATURATED tracking.
-        self._consolidation_sizes.append(len(self.bullets))
+        if track_saturation:
+            # Record bullet count after this consolidation for SATURATED tracking.
+            self._consolidation_sizes.append(len(self.bullets))
 
     def _sorted_entries(self, section):
         entries = [(bid, b) for bid, b in self.bullets.items() if b["section"] == section]

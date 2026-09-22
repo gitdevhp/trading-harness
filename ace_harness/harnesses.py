@@ -617,8 +617,12 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
                 playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
             )
             _apply_bullet_checks(memory, reflection.get("bullet_checks"))
-            ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
-            memory.apply_delta_ops(ops)
+            # Gate slow-loop consolidation on frozen (Algorithm 2: "leave M unchanged"
+            # when frozen). track_saturation=False keeps slow-loop calls out of
+            # _consolidation_sizes so SATURATED(M) only reflects fast-loop learning.
+            if not _frozen[0]:
+                ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
+                memory.apply_delta_ops(ops, track_saturation=False)
             memory.save(memory_path)
 
             if risk_harness is not None and risk_tuner is not None:
