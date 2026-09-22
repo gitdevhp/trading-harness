@@ -639,6 +639,7 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
         status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
                        f"Cash: {portfolio_state['cash_pct']:.1f}%")
         playbook_text = memory.format_for_prompt()  # snapshot once; same for all rounds
+        n_stocks = len(universe.anon_universe)
 
         feedback = None
         direction = None
@@ -646,19 +647,25 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
         admitted = False
         g_sto = False
 
+        print(f"[autogov] {current_date} fast-loop start  frozen={_frozen[0]}  mem_bullets={len(memory.bullets)}")
         for r in range(1, max_rounds + 1):
             # Solver ALWAYS receives the memory snapshot (never switched off)
             raw_alloc, _trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                               playbook_text=playbook_text,
                                               feedback_text=feedback, direction=direction)
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
-                                               playbook_text=playbook_text, round_num=r)
+                                               playbook_text=playbook_text, round_num=r,
+                                               n_universe_stocks=n_stocks)
             rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
             all_lessons.extend(review.get("lessons", []))
 
             admitted = review["verdict"] == "accept"
             g_ref = review.get("should_refine", True)   # continue loop?
             g_sto = review.get("should_store", False)   # worth consolidating?
+
+            print(f"[autogov]   r{r}: verdict={review['verdict']}  dir={review.get('direction','')}  "
+                  f"g_ref={g_ref}  g_sto={g_sto}  "
+                  f"feedback={review.get('feedback','')[:80]!r}")
 
             if admitted:
                 break  # accepted: done
@@ -668,6 +675,8 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
 
             feedback = review["feedback"]
             direction = review.get("direction")
+
+        print(f"[autogov]   result: admitted={admitted}  g_sto={g_sto}  frozen={_frozen[0]}")
 
         # --- CONSOLIDATION gate (Algorithm 2 line 11) -------------------------
         consolidated = False
