@@ -203,7 +203,7 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
 
     # ── ADAPTIVE ──────────────────────────────────────────────────────────────
     ADAPTIVE_DIR="${UNI_DIR}/adaptive"
-    ADAPTIVE_JSON="${ADAPTIVE_DIR}/monthly_adaptive_convictionriskharness_adaptive_results.json"
+    ADAPTIVE_JSON="${ADAPTIVE_DIR}/monthly_adaptive_autogover_results.json"
     if [[ -f "$ADAPTIVE_JSON" ]]; then
         echo "  [skip] ADAPTIVE — results already exist"
     else
@@ -287,7 +287,7 @@ universes = ["tech18", "mag7", "balanced15", "sp30", "diversified40", "volatile2
 systems = [
     ("memory",   "monthly_memory_only_convictionriskharness_adaptive_results.json", "MEMORY"),
     ("debater",  "monthly_intra_convictionriskharness_results.json",                "DEBATER"),
-    ("adaptive", "monthly_adaptive_convictionriskharness_adaptive_results.json",    "ADAPTIVE"),
+    ("adaptive", "monthly_adaptive_autogover_results.json",                          "ADAPTIVE"),
 ]
 
 def metrics(path):
