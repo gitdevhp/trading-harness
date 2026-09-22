@@ -58,68 +58,91 @@ echo "Max tokens:      ${MAX_TOKENS}"
 echo "Output dir:      ${OUTPUT_DIR}"
 echo "=========================================="
 
-# ── Start vLLM ────────────────────────────────────────────────────────────────
+# ── Determine what work is needed ─────────────────────────────────────────────
 
-echo "Starting vLLM server..."
-vllm serve "$ACE_SOLVER_MODEL" \
-    --host 127.0.0.1 \
-    --port 8000 \
-    --tensor-parallel-size 1 \
-    --max-model-len 32768 \
-    --gpu-memory-utilization 0.90 \
-    --enable-chunked-prefill \
-    --enable-auto-tool-choice \
-    --tool-call-parser hermes &
+ADAPTIVE_JSON="$OUTPUT_DIR/monthly_adaptive_convictionriskharness_adaptive_results.json"
 
-VLLM_PID=$!
+NEED_LLM=false
+if [[ ! -f "$ADAPTIVE_JSON" ]]; then
+    NEED_LLM=true
+fi
+for SYSTEM in intra memory_only dual_permanent; do
+    BASELINE_JSON="$OUTPUT_DIR/monthly_${SYSTEM}_convictionriskharness_adaptive_results.json"
+    if [[ ! -f "$BASELINE_JSON" ]]; then
+        NEED_LLM=true
+    fi
+done
+
+# ── Start vLLM (only if there is LLM work to do) ──────────────────────────────
+
+VLLM_PID=""
 
 cleanup() {
-    echo "Stopping vLLM server (PID: ${VLLM_PID})..."
-    if kill -0 "$VLLM_PID" 2>/dev/null; then
+    if [[ -n "$VLLM_PID" ]] && kill -0 "$VLLM_PID" 2>/dev/null; then
+        echo "Stopping vLLM server (PID: ${VLLM_PID})..."
         kill "$VLLM_PID" 2>/dev/null || true
         wait "$VLLM_PID" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
-echo "Waiting for vLLM server (PID: ${VLLM_PID})..."
-START_TIME=$(date +%s)
-VLLM_TIMEOUT=1800
+if [[ "$NEED_LLM" == "true" ]]; then
+    echo "Starting vLLM server..."
+    vllm serve "$ACE_SOLVER_MODEL" \
+        --host 127.0.0.1 \
+        --port 8000 \
+        --tensor-parallel-size 1 \
+        --max-model-len 32768 \
+        --gpu-memory-utilization 0.90 \
+        --enable-chunked-prefill \
+        --enable-auto-tool-choice \
+        --tool-call-parser hermes &
 
-while ! curl -fsS http://127.0.0.1:8000/v1/models >/dev/null; do
-    if ! kill -0 "$VLLM_PID" 2>/dev/null; then
-        echo "ERROR: vLLM server died during startup."
-        exit 1
-    fi
-    elapsed=$(( $(date +%s) - START_TIME ))
-    if (( elapsed >= VLLM_TIMEOUT )); then
-        echo "ERROR: vLLM startup timed out after ${elapsed}s."
-        exit 1
-    fi
-    echo "  Server loading... ${elapsed}s"
-    sleep 5
-done
+    VLLM_PID=$!
 
-echo "vLLM server is online."
+    echo "Waiting for vLLM server (PID: ${VLLM_PID})..."
+    START_TIME=$(date +%s)
+    VLLM_TIMEOUT=1800
+
+    while ! curl -fsS http://127.0.0.1:8000/v1/models >/dev/null; do
+        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+            echo "ERROR: vLLM server died during startup."
+            exit 1
+        fi
+        elapsed=$(( $(date +%s) - START_TIME ))
+        if (( elapsed >= VLLM_TIMEOUT )); then
+            echo "ERROR: vLLM startup timed out after ${elapsed}s."
+            exit 1
+        fi
+        echo "  Server loading... ${elapsed}s"
+        sleep 5
+    done
+
+    echo "vLLM server is online."
+else
+    echo "[resume] All result files already exist — skipping vLLM startup."
+fi
 
 # ── Run adaptive backtest ──────────────────────────────────────────────────────
 
-echo ""
-echo "=========================================="
-echo "RUNNING ADAPTIVE SYSTEM"
-echo "=========================================="
+if [[ -f "$ADAPTIVE_JSON" ]]; then
+    echo "[skip] Adaptive results already exist: $ADAPTIVE_JSON"
+else
+    echo ""
+    echo "=========================================="
+    echo "RUNNING ADAPTIVE SYSTEM"
+    echo "=========================================="
 
-python -m ace_harness.run_monthly_adaptive \
-    --tickers "${TICKERS[@]}" \
-    --start "$START_DATE" \
-    --end "$END_DATE" \
-    --output_dir "$OUTPUT_DIR" \
-    --initial_capital "$INITIAL_CAPITAL" \
-    --rebalance-days "$REBALANCE_DAYS" \
-    --max_tokens "$MAX_TOKENS" \
-    --fallback_mode equal_weight
-
-ADAPTIVE_JSON="$OUTPUT_DIR/monthly_adaptive_convictionriskharness_adaptive_results.json"
+    python -m ace_harness.run_monthly_adaptive \
+        --tickers "${TICKERS[@]}" \
+        --start "$START_DATE" \
+        --end "$END_DATE" \
+        --output_dir "$OUTPUT_DIR" \
+        --initial_capital "$INITIAL_CAPITAL" \
+        --rebalance-days "$REBALANCE_DAYS" \
+        --max_tokens "$MAX_TOKENS" \
+        --fallback_mode equal_weight
+fi
 
 if [[ ! -f "$ADAPTIVE_JSON" ]]; then
     echo "ERROR: adaptive results file not found: $ADAPTIVE_JSON"
@@ -167,10 +190,16 @@ for SYSTEM in intra memory_only dual_permanent; do
     fi
 done
 
-python -m ace_harness.plot_adaptive \
-    --adaptive_json "$ADAPTIVE_JSON" \
-    ${#BASELINE_ARGS[@]:+--baseline_jsons "${BASELINE_ARGS[@]}"} \
-    --output_png "$OUTPUT_DIR/adaptive_routing.png"
+if [[ ${#BASELINE_ARGS[@]} -gt 0 ]]; then
+    python -m ace_harness.plot_adaptive \
+        --adaptive_json "$ADAPTIVE_JSON" \
+        --baseline_jsons "${BASELINE_ARGS[@]}" \
+        --output_png "$OUTPUT_DIR/adaptive_routing.png"
+else
+    python -m ace_harness.plot_adaptive \
+        --adaptive_json "$ADAPTIVE_JSON" \
+        --output_png "$OUTPUT_DIR/adaptive_routing.png"
+fi
 
 # ── Print metrics summary ──────────────────────────────────────────────────────
 
