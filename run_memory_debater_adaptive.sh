@@ -8,7 +8,7 @@
 #SBATCH --gres=gpu:a40:1
 #SBATCH --partition=interactive-gpu
 
-# Runs memory_only + intra (debater) + dual_permanent + adaptive for all 6
+# Runs memory_only + intra (debater) + dual (fixed ReMo) + adaptive for all 6
 # universes.
 #
 # Output structure:
@@ -85,7 +85,7 @@ echo "ACE — memory_only + intra + adaptive"
 echo "=========================================="
 echo "Job:          ${JOB_ID}"
 echo "Model:        ${MODEL}"
-echo "Systems:      memory_only (MEMORY) | intra (DEBATER) | dual_permanent (DUAL) | adaptive (ADAPTIVE)"
+echo "Systems:      memory_only (MEMORY) | intra (DEBATER) | dual/fixed-ReMo (DUAL) | adaptive/AutoGovern (ADAPTIVE)"
 echo "Universes:    ${UNIVERSE_TAGS[*]}"
 echo "Period:       ${START_DATE} -> ${END_DATE}"
 echo "Capital:      \$${INITIAL_CAPITAL}"
@@ -202,19 +202,22 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
         echo "Done -> ${DEBATER_DIR}/"
     fi
 
-    # ── DUAL (memory + debater) ───────────────────────────────────────────────
+    # ── DUAL / fixed ReMo (memory + debater, no governance gates) ────────────
+    # Uses make_dual_timescale (--systems dual): K=3 rounds, always consolidates
+    # all fast-loop lessons with no admission gate — this is the paper's fixed
+    # ReMo baseline that AutoGovern is compared against for token savings.
     DUAL_DIR="${UNI_DIR}/dual"
     if compgen -G "${DUAL_DIR}/*_results.json" >/dev/null 2>&1; then
         echo "  [skip] DUAL — results already exist"
     else
         echo ""
-        echo "--- Running DUAL (dual_permanent) ---"
+        echo "--- Running DUAL (fixed ReMo, dual/make_dual_timescale) ---"
         mkdir -p "$DUAL_DIR"
         python -m ace_harness.run_monthly \
             --tickers "${TICKER_ARRAY[@]}" \
             --start "$START_DATE" \
             --end   "$END_DATE" \
-            --systems dual_permanent \
+            --systems dual \
             --output_dir "$DUAL_DIR" \
             --risk_harness_type conviction \
             --initial_capital "$INITIAL_CAPITAL" \
