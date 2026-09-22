@@ -8,16 +8,17 @@
 #SBATCH --gres=gpu:a40:1
 #SBATCH --partition=interactive-gpu
 
-# Runs memory_only + intra (debater) + adaptive for all 6 universes.
-# dual_permanent is intentionally excluded (already run separately).
+# Runs memory_only + intra (debater) + dual_permanent + adaptive for all 6
+# universes.
 #
 # Output structure:
 #   {OUT_ROOT}/{universe}/memory/    ← memory_only results
-#   {OUT_ROOT}/{universe}/debater/   ← intra results
-#   {OUT_ROOT}/{universe}/adaptive/  ← adaptive results + playbook
+#   {OUT_ROOT}/{universe}/debater/   ← intra (debater-only) results
+#   {OUT_ROOT}/{universe}/dual/      ← dual_permanent results
+#   {OUT_ROOT}/{universe}/adaptive/  ← adaptive (AutoGovern) results + playbook
 #
-# Optional: set ACE_RESULTS_ROOT to an existing ace_ablation directory
-# (e.g. ace_ablation_1618531) to include dual_permanent baselines in plots.
+# Token usage is saved inside each *_results.json under "token_usage" and is
+# summarised in the final cross-universe table.
 #
 # Resume: each step checks for existing *_results.json and skips if found.
 # vLLM is only started if at least one step needs to run.
@@ -84,7 +85,7 @@ echo "ACE — memory_only + intra + adaptive"
 echo "=========================================="
 echo "Job:          ${JOB_ID}"
 echo "Model:        ${MODEL}"
-echo "Systems:      memory_only (MEMORY) | intra (DEBATER) | adaptive"
+echo "Systems:      memory_only (MEMORY) | intra (DEBATER) | dual_permanent (DUAL) | adaptive (ADAPTIVE)"
 echo "Universes:    ${UNIVERSE_TAGS[*]}"
 echo "Period:       ${START_DATE} -> ${END_DATE}"
 echo "Capital:      \$${INITIAL_CAPITAL}"
@@ -98,7 +99,7 @@ echo "=========================================="
 # ── Determine if any LLM work is needed ───────────────────────────────────────
 NEED_LLM=false
 for TAG in "${UNIVERSE_TAGS[@]}"; do
-    for SUBDIR in memory debater adaptive; do
+    for SUBDIR in memory debater dual adaptive; do
         DIR="${OUT_ROOT}/${TAG}/${SUBDIR}"
         if ! compgen -G "${DIR}/*_results.json" >/dev/null 2>&1; then
             NEED_LLM=true
@@ -201,6 +202,27 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
         echo "Done -> ${DEBATER_DIR}/"
     fi
 
+    # ── DUAL (memory + debater) ───────────────────────────────────────────────
+    DUAL_DIR="${UNI_DIR}/dual"
+    if compgen -G "${DUAL_DIR}/*_results.json" >/dev/null 2>&1; then
+        echo "  [skip] DUAL — results already exist"
+    else
+        echo ""
+        echo "--- Running DUAL (dual_permanent) ---"
+        mkdir -p "$DUAL_DIR"
+        python -m ace_harness.run_monthly \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start "$START_DATE" \
+            --end   "$END_DATE" \
+            --systems dual_permanent \
+            --output_dir "$DUAL_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --fallback_mode equal_weight \
+            --max_tokens "$MAX_TOKENS"
+        echo "Done -> ${DUAL_DIR}/"
+    fi
+
     # ── ADAPTIVE ──────────────────────────────────────────────────────────────
     ADAPTIVE_DIR="${UNI_DIR}/adaptive"
     ADAPTIVE_JSON="${ADAPTIVE_DIR}/monthly_adaptive_autogover_results.json"
@@ -228,21 +250,11 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
 
     # Collect all result JSONs for this universe
     ALL_RESULTS=()
-    for SUBDIR in memory debater; do
+    for SUBDIR in memory debater dual; do
         while IFS= read -r -d '' f; do
             ALL_RESULTS+=("$f")
         done < <(find "${UNI_DIR}/${SUBDIR}" -name "*_results.json" -print0 2>/dev/null)
     done
-
-    # Add dual_permanent results from prior run if provided
-    ACE_BASELINE=""
-    if [[ -n "$ACE_RESULTS_ROOT" ]]; then
-        ACE_JSON=$(find "${ACE_RESULTS_ROOT}/${UNIVERSE_TAG}/ace" -name "*_results.json" 2>/dev/null | head -1)
-        if [[ -n "$ACE_JSON" ]]; then
-            ALL_RESULTS+=("$ACE_JSON")
-            ACE_BASELINE="$ACE_JSON"
-        fi
-    fi
 
     if [[ ${#ALL_RESULTS[@]} -gt 0 ]]; then
         python -m ace_harness.compare_results "${ALL_RESULTS[@]}" || true
@@ -253,9 +265,10 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
         BASELINE_ARGS=()
         MEM_JSON=$(find "${MEMORY_DIR}" -name "*_results.json" 2>/dev/null | head -1)
         DEB_JSON=$(find "${DEBATER_DIR}" -name "*_results.json" 2>/dev/null | head -1)
+        DUAL_JSON=$(find "${DUAL_DIR}" -name "*_results.json" 2>/dev/null | head -1)
         [[ -n "$MEM_JSON" ]] && BASELINE_ARGS+=("$MEM_JSON")
         [[ -n "$DEB_JSON" ]] && BASELINE_ARGS+=("$DEB_JSON")
-        [[ -n "$ACE_BASELINE" ]] && BASELINE_ARGS+=("$ACE_BASELINE")
+        [[ -n "$DUAL_JSON" ]] && BASELINE_ARGS+=("$DUAL_JSON")
 
         if [[ ${#BASELINE_ARGS[@]} -gt 0 ]]; then
             python -m ace_harness.plot_adaptive \
@@ -280,26 +293,35 @@ echo "CROSS-UNIVERSE METRICS SUMMARY"
 echo "=========================================="
 
 python - <<'PYEOF'
-import json, os, sys, math, statistics
+import glob, json, math, os, statistics
 
 out_root = os.environ.get("OUT_ROOT", "")
 universes = ["tech18", "mag7", "balanced15", "sp30", "diversified40", "volatile25"]
+# (subdir, label)  — filename resolved by glob inside each subdir
 systems = [
-    ("memory",   "monthly_memory_only_convictionriskharness_adaptive_results.json", "MEMORY"),
-    ("debater",  "monthly_intra_convictionriskharness_results.json",                "DEBATER"),
-    ("adaptive", "monthly_adaptive_autogover_results.json",                          "ADAPTIVE"),
+    ("memory",   "MEMORY"),
+    ("debater",  "DEBATER"),
+    ("dual",     "DUAL"),
+    ("adaptive", "ADAPTIVE"),
 ]
 
-def metrics(path):
+def load_result(subdir, uni):
+    """Return (path, data) for the first *_results.json found, or (None, None)."""
+    matches = glob.glob(os.path.join(out_root, uni, subdir, "*_results.json"))
+    if not matches:
+        return None, None
+    path = matches[0]
     with open(path) as f:
-        data = json.load(f)
+        return path, json.load(f)
+
+def perf_metrics(data):
     history = data if isinstance(data, list) else data.get("history", [])
     vals = [r["portfolio_value"] for r in history if "portfolio_value" in r]
     if not vals:
         return None
     cap = vals[0]
     total_ret = (vals[-1] / cap - 1) * 100
-    rets = [vals[i]/vals[i-1] - 1 for i in range(1, len(vals))]
+    rets = [vals[i] / vals[i-1] - 1 for i in range(1, len(vals))]
     sharpe = float("nan")
     if len(rets) > 1:
         m, s = statistics.mean(rets), statistics.stdev(rets)
@@ -313,25 +335,56 @@ def metrics(path):
     calmar = total_ret / abs(maxdd) if maxdd < 0 else float("nan")
     return total_ret, sharpe, maxdd, calmar
 
-header = f"{'Universe':<15} {'System':<10} {'TotalRet':>9} {'Sharpe':>7} {'MaxDD':>8} {'Calmar':>7}"
-print(header)
-print("-" * len(header))
-
+# ── Performance table ──────────────────────────────────────────────────────────
+hdr = f"{'Universe':<15} {'System':<10} {'TotalRet':>9} {'Sharpe':>7} {'MaxDD':>8} {'Calmar':>7}"
+print(hdr)
+print("-" * len(hdr))
 for uni in universes:
-    for subdir, fname, label in systems:
-        path = os.path.join(out_root, uni, subdir, fname)
-        # try glob fallback
-        if not os.path.exists(path):
-            import glob
-            matches = glob.glob(os.path.join(out_root, uni, subdir, "*_results.json"))
-            path = matches[0] if matches else ""
-        if not path or not os.path.exists(path):
+    for subdir, label in systems:
+        _, data = load_result(subdir, uni)
+        if data is None:
             continue
-        m = metrics(path)
+        m = perf_metrics(data)
         if m:
             tr, sh, dd, ca = m
             print(f"{uni:<15} {label:<10} {tr:>8.2f}% {sh:>7.2f} {dd:>7.2f}% {ca:>7.2f}")
     print()
+
+# ── Token-usage table ──────────────────────────────────────────────────────────
+print()
+print("TOKEN USAGE PER SYSTEM × UNIVERSE")
+thdr = f"{'Universe':<15} {'System':<10} {'Calls':>7} {'Prompt':>12} {'Completion':>12} {'Total':>12}"
+print(thdr)
+print("-" * len(thdr))
+
+grand = {s: {"calls": 0, "prompt": 0, "completion": 0, "total": 0} for _, s in systems}
+
+for uni in universes:
+    for subdir, label in systems:
+        _, data = load_result(subdir, uni)
+        if data is None:
+            continue
+        tok = data.get("token_usage") if isinstance(data, dict) else None
+        if not tok:
+            continue
+        calls = tok.get("calls", 0)
+        prompt = tok.get("prompt", 0)
+        comp = tok.get("completion", 0)
+        total = tok.get("total", 0)
+        print(f"{uni:<15} {label:<10} {calls:>7,} {prompt:>12,} {comp:>12,} {total:>12,}")
+        grand[label]["calls"]      += calls
+        grand[label]["prompt"]     += prompt
+        grand[label]["completion"] += comp
+        grand[label]["total"]      += total
+    print()
+
+print("TOTALS ACROSS ALL UNIVERSES")
+print("-" * len(thdr))
+for _, label in systems:
+    g = grand[label]
+    if g["calls"] == 0:
+        continue
+    print(f"{'ALL':<15} {label:<10} {g['calls']:>7,} {g['prompt']:>12,} {g['completion']:>12,} {g['total']:>12,}")
 
 PYEOF
 
