@@ -40,7 +40,7 @@ print("=" * 60)
 universe    = MarketUniverse(TICKERS)
 universe.prefetch(START, END)
 
-solver      = Solver()
+solver      = Solver(universe)
 debater     = Debater()
 consolidator = Consolidator()
 memory      = ExperienceMemory()
