@@ -26,6 +26,7 @@ Usage (from the directory containing ace_harness/):
         --start 2024-01-01 --end 2024-12-31 --output_dir ./results
 """
 import argparse
+import json
 import os
 
 from ace_harness.market import MarketUniverse
@@ -147,6 +148,16 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
     print(f"[{tag}] done -> {output_file}")
     print(f"[tokens]   calls={tok['calls']}  prompt={tok['prompt']:,}  "
           f"completion={tok['completion']:,}  total={tok['total']:,}")
+    # Persist token counts into the result JSON for cross-run comparison.
+    try:
+        with open(output_file) as fh:
+            result = json.load(fh)
+        if isinstance(result, dict):
+            result["token_usage"] = tok
+            with open(output_file, "w") as fh:
+                json.dump(result, fh, indent=2, allow_nan=False)
+    except Exception:
+        pass
 
 
 def main():
