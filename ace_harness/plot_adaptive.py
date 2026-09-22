@@ -1,16 +1,18 @@
 """
-Visualize the adaptive routing backtest results.
+Visualize adaptive self-improvement behaviour matching the paper's metrics.
 
-Reads the JSON produced by run_monthly_adaptive.py and generates a
-three-panel figure:
+Three-panel figure following the structure of Tables 8/9 in the ReMo paper:
 
-  Panel 1 — Cumulative portfolio value over time.  One line for the
-             adaptive system; optionally overlaid with the four sub-systems
-             and equal-weight for context.
-  Panel 2 — System selection timeline: a colored horizontal bar per period
-             showing which system was active.
-  Panel 3 — Routing features over time: momentum breadth (fraction of
-             assets above their 200d-SMA) and N-stocks annotation.
+  Panel 1 — Cumulative portfolio returns (adaptive vs. baselines).
+  Panel 2 — Consolidation decisions per rebalance period:
+               admitted / consolidated / skipped — matching the paper's
+               "consolidator calls per task" and "admitted" fraction metrics.
+  Panel 3 — Memory size over time (bullets in playbook) — matching the
+               paper's final memory size metric.
+
+For the adaptive routing run produced by run_monthly_adaptive.py, also
+overlays the per-period system selection (harness/debater/memory/ace) as
+a color band across the top of Panel 2.
 
 Usage:
     python -m ace_harness.plot_adaptive \
@@ -120,75 +122,82 @@ def plot_adaptive(adaptive_json, baseline_jsons=None, output_png=None, initial_c
     ax1.set_title("Cumulative Return", fontsize=10)
     plt.setp(ax1.get_xticklabels(), visible=False)
 
-    # ── Panel 2: System selection timeline ───────────────────────────────────
+    # ── Panel 2: Consolidation decisions (admitted / consolidated / skipped) ─
     ax2 = axes[1]
-    if selection_log:
-        for i, row in enumerate(selection_log):
-            left = row["date"]
-            right = selection_log[i + 1]["date"] if i + 1 < len(selection_log) else dates[-1]
-            color = SYSTEM_COLORS.get(row["system"], "#999999")
-            # Convert to numeric x-axis position using index
-            li = dates.index(left) if left in dates else 0
-            ri = dates.index(right) if right in dates else len(dates) - 1
-            ax2.barh(0, ri - li, left=li, height=0.7, color=color, alpha=0.85, edgecolor="white", linewidth=0.4)
-            # Label the system name inside wider bars
-            if ri - li > 3:
-                ax2.text(li + (ri - li) / 2, 0, SYSTEM_LABELS.get(row["system"], row["system"]),
-                         ha="center", va="center", fontsize=7, color="white", fontweight="bold")
+    rebalance_entries = [h for h in (data if isinstance(data, list) else data.get("history", []))
+                         if h.get("meta")]
+    if rebalance_entries:
+        xs = [dates.index(h["date"]) if h["date"] in dates else 0 for h in rebalance_entries]
+        admitted_xs = [x for h, x in zip(rebalance_entries, xs) if h["meta"].get("admitted")]
+        consolidated_xs = [x for h, x in zip(rebalance_entries, xs) if h["meta"].get("consolidated")]
+        skipped_xs = [x for h, x in zip(rebalance_entries, xs) if not h["meta"].get("admitted")]
 
-        patches = [mpatches.Patch(color=c, label=SYSTEM_LABELS.get(s, s))
-                   for s, c in SYSTEM_COLORS.items()]
-        ax2.legend(handles=patches, loc="upper right", fontsize=7, ncol=4)
+        ax2.scatter(admitted_xs, [1.5] * len(admitted_xs), marker="o", color="#2E7D32",
+                    s=60, zorder=4, label=f"Admitted ({len(admitted_xs)})")
+        ax2.scatter(consolidated_xs, [1.0] * len(consolidated_xs), marker="^", color="#1565C0",
+                    s=60, zorder=4, label=f"Consolidated ({len(consolidated_xs)})")
+        ax2.scatter(skipped_xs, [0.5] * len(skipped_xs), marker="x", color="#B71C1C",
+                    s=50, zorder=4, label=f"Skipped / not admitted ({len(skipped_xs)})")
 
-    ax2.set_yticks([])
+        # Overlay system selection band if adaptive routing was used
+        for h, x in zip(rebalance_entries, xs):
+            system = (h["meta"].get("adaptive") or {}).get("system")
+            if system:
+                ax2.axvspan(x - 0.4, x + 0.4, alpha=0.15,
+                            color=SYSTEM_COLORS.get(system, "#999999"), zorder=1)
+
+    ax2.set_yticks([0.5, 1.0, 1.5])
+    ax2.set_yticklabels(["Skipped", "Consolidated", "Admitted"], fontsize=7)
     ax2.set_xlim(0, len(dates))
     ax2.set_xticks([])
-    ax2.set_title("System Selected per Rebalance Period", fontsize=10)
-    ax2.set_ylabel("Active\nSystem")
+    ax2.legend(loc="upper right", fontsize=7, ncol=3)
+    ax2.set_title("Consolidation Decisions per Rebalance (AdaReMo-style gate)", fontsize=10)
+    ax2.grid(True, alpha=0.2)
 
-    # ── Panel 3: Routing features ─────────────────────────────────────────────
+    # ── Panel 3: Memory size over time ────────────────────────────────────────
     ax3 = axes[2]
-    if selection_log:
-        feat_dates = [r["date"] for r in selection_log]
-        breadths   = [r["features"].get("price_breadth", 0) * 100 for r in selection_log]
-        dispersions = [r["features"].get("return_dispersion", 0) for r in selection_log]
+    if rebalance_entries:
+        mem_xs = [dates.index(h["date"]) if h["date"] in dates else 0 for h in rebalance_entries]
+        mem_sizes = [h["meta"].get("memory_size", 0) for h in rebalance_entries]
+        ax3.step(mem_xs, mem_sizes, where="post", color="#4A148C", linewidth=2,
+                 label="Playbook bullets (memory size)")
+        ax3.fill_between(mem_xs, mem_sizes, alpha=0.12, color="#4A148C", step="post")
 
-        # Map feature dates to numeric positions
-        feat_xs = [dates.index(d) if d in dates else 0 for d in feat_dates]
-
-        ax3.step(feat_xs, breadths, where="post", color="#1565C0", linewidth=1.8,
-                 label="Price Breadth (% above 200d-SMA)")
-        ax3.axhline(40, color="#E53935", linewidth=1, linestyle="--", alpha=0.7, label="Bear threshold (40%)")
-        ax3.axhline(55, color="#2E7D32", linewidth=1, linestyle="--", alpha=0.7, label="Bull threshold (55%)")
-
-        ax3_r = ax3.twinx()
-        ax3_r.step(feat_xs, dispersions, where="post", color="#FF6F00", linewidth=1.2,
-                   alpha=0.6, linestyle=":", label="Return dispersion (std 1M-Mom)")
-        ax3_r.set_ylabel("Dispersion (%)", fontsize=8, color="#FF6F00")
-        ax3_r.tick_params(axis="y", labelcolor="#FF6F00")
-
-    ax3.set_ylabel("Price Breadth (%)")
-    ax3.set_ylim(0, 110)
+    ax3.set_ylabel("Bullets in Playbook")
     ax3.legend(loc="upper left", fontsize=7)
     ax3.set_xlim(0, len(dates))
-    # Set x-tick labels to dates at sensible intervals
     tick_step = max(1, len(dates) // 12)
     tick_positions = list(range(0, len(dates), tick_step))
     ax3.set_xticks(tick_positions)
     ax3.set_xticklabels([dates[i] for i in tick_positions], rotation=30, fontsize=7, ha="right")
-    ax3.set_title("Routing Features", fontsize=10)
+    ax3.set_title("Memory Growth (saturates when bullets plateau)", fontsize=10)
     ax3.grid(True, alpha=0.3)
 
-    # Summary stats in text box
-    if selection_log:
-        counts = {}
-        for r in selection_log:
-            counts[r["system"]] = counts.get(r["system"], 0) + 1
-        total = sum(counts.values())
-        summary_lines = [f"{SYSTEM_LABELS.get(s, s)}: {c}/{total} periods"
-                         for s, c in sorted(counts.items(), key=lambda x: -x[1])]
-        summary = "\n".join(summary_lines)
-        fig.text(0.82, 0.02, summary, fontsize=8, family="monospace",
+    # Summary stats matching Tables 8/9 in the paper
+    if rebalance_entries:
+        total_rebal = len(rebalance_entries)
+        n_admitted = sum(1 for h in rebalance_entries if h["meta"].get("admitted"))
+        n_consol = sum(1 for h in rebalance_entries if h["meta"].get("consolidated"))
+        final_mem = max((h["meta"].get("memory_size", 0) for h in rebalance_entries), default=0)
+        pct_admitted = 100 * n_admitted / max(total_rebal, 1)
+        pct_consol = 100 * n_consol / max(total_rebal, 1)
+        summary = (
+            f"Rebalances:      {total_rebal}\n"
+            f"Admitted:        {n_admitted} ({pct_admitted:.0f}%)\n"
+            f"Consolidated:    {n_consol} ({pct_consol:.0f}%)\n"
+            f"Final memory:    {final_mem} bullets"
+        )
+        # Add system selection breakdown if adaptive routing
+        sel_counts = {}
+        for h in rebalance_entries:
+            s = (h["meta"].get("adaptive") or {}).get("system")
+            if s:
+                sel_counts[s] = sel_counts.get(s, 0) + 1
+        if sel_counts:
+            summary += "\n--- routing ---"
+            for s, c in sorted(sel_counts.items(), key=lambda x: -x[1]):
+                summary += f"\n{SYSTEM_LABELS.get(s, s):10s}: {c}/{total_rebal}"
+        fig.text(0.82, 0.02, summary, fontsize=7.5, family="monospace",
                  verticalalignment="bottom",
                  bbox=dict(boxstyle="round,pad=0.4", facecolor="lightyellow", alpha=0.8))
 
