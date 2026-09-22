@@ -41,6 +41,9 @@ class ExperienceMemory:
         self.sections = sections or list(DEFAULT_SECTIONS)
         self.bullets = {}  # id -> {"section", "content", "helpful", "harmful"}
         self._counter = itertools.count(1)
+        # AdaReMo SATURATED tracking: record bullet count after each consolidation
+        # so is_saturated() can detect when the memory has stopped growing.
+        self._consolidation_sizes = []  # bullet counts after each apply_delta_ops call
 
     def _new_id(self, section: str) -> str:
         n = next(self._counter)
@@ -106,6 +109,24 @@ class ExperienceMemory:
         for section, content in seeds:
             self.add_bullet(section, content)
 
+    def is_saturated(self, window: int = 5, min_growth: int = 1) -> bool:
+        """AdaReMo Algorithm 2: SATURATED(M).
+
+        Returns True when the last `window` consolidation calls collectively
+        added fewer than `min_growth` net new bullets — the memory has stopped
+        learning new reusable structure and further consolidation would only
+        add prompt cost without knowledge gain.
+
+        Never fires until at least `window` consolidations have happened, so
+        early tasks always write their lessons; this matches the paper's
+        observation that SATURATED "never fired" within their task streams.
+        """
+        if len(self._consolidation_sizes) < window:
+            return False
+        oldest = self._consolidation_sizes[-window]
+        current = len(self.bullets)
+        return (current - oldest) < min_growth
+
     def apply_delta_ops(self, ops):
         """ops: list of dicts, one of
             {"op": "add", "section": str, "content": str}
@@ -129,6 +150,8 @@ class ExperienceMemory:
             elif kind == "remove":
                 self.bullets.pop(op.get("id", ""), None)
         self.prune()
+        # Record bullet count after this consolidation for SATURATED tracking.
+        self._consolidation_sizes.append(len(self.bullets))
 
     def _sorted_entries(self, section):
         entries = [(bid, b) for bid, b in self.bullets.items() if b["section"] == section]

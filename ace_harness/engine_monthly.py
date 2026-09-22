@@ -49,6 +49,7 @@ def run_backtest(
 
     results = []
     decision_log = {}
+    meta = {}  # initialize so the variable is always in scope below
 
     for idx, current_date in enumerate(trading_days):
         prices = universe.close_prices(current_date)
@@ -93,12 +94,22 @@ def run_backtest(
             }
 
         new_value = cash + sum(holdings[a] * prices[a] for a in universe.anon_universe)
-        results.append({
+        entry = {
             "date": current_date,
             "prices": {universe.reverse_map[a]: prices[a] for a in universe.anon_universe},
             "portfolio_value": round(new_value, 2),
             "allocations": {universe.reverse_map.get(k, k): v for k, v in target_allocs.items()},
-        })
+        }
+        if is_rebalance and meta:
+            # Save lightweight meta fields for visualization; skip large nested
+            # structures (rounds logs, traces) that would bloat the file.
+            saved_meta = {}
+            for key in ("adaptive", "admitted", "consolidated", "memory_size"):
+                if key in meta:
+                    saved_meta[key] = meta[key]
+            if saved_meta:
+                entry["meta"] = saved_meta
+        results.append(entry)
 
     with open(output_file, "w") as f:
         json.dump(results, f, indent=4)
