@@ -93,12 +93,21 @@ def run_backtest(
             }
 
         new_value = cash + sum(holdings[a] * prices[a] for a in universe.anon_universe)
-        results.append({
+        entry = {
             "date": current_date,
             "prices": {universe.reverse_map[a]: prices[a] for a in universe.anon_universe},
             "portfolio_value": round(new_value, 2),
             "allocations": {universe.reverse_map.get(k, k): v for k, v in target_allocs.items()},
-        })
+        }
+        if is_rebalance and meta:
+            # Save adaptive routing info and any other lightweight meta fields;
+            # skip large nested structures (rounds logs, traces) to keep the file small.
+            saved_meta = {}
+            if "adaptive" in meta:
+                saved_meta["adaptive"] = meta["adaptive"]
+            if saved_meta:
+                entry["meta"] = saved_meta
+        results.append(entry)
 
     with open(output_file, "w") as f:
         json.dump(results, f, indent=4)

@@ -553,6 +553,43 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
     return decision_fn
 
 
+def make_adaptive_router(universe, system_fns: dict, router_fn=None):
+    """Adaptive system selector: at each rebalance, computes observable
+    universe-structure features and routes to the best-fit system.
+
+    system_fns: dict mapping system name → decision_fn, e.g.
+        {"debater": intra_fn, "ace": ace_fn, "memory": mem_fn, "harness": base_fn}
+    router_fn: callable(universe, current_date) -> (system_name, reason, features)
+        If None, uses the default rule-based router from adaptive_router.py.
+
+    The system selection and features are logged in the returned meta dict so
+    the per-period selection history can be read from the results JSON and
+    visualized by plot_adaptive.py.
+    """
+    from ace_harness import adaptive_router as _ar
+
+    def _default_router(universe, current_date):
+        features = _ar.compute_features(universe, current_date)
+        system, reason = _ar.route(features)
+        return system, reason, features
+
+    _router = router_fn if router_fn is not None else _default_router
+
+    def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
+        system_name, reason, features = _router(universe, current_date)
+        fn = system_fns.get(system_name) or system_fns.get("harness")
+        raw_alloc, meta = fn(current_date, portfolio_state, decision_log, rebalance_days)
+        meta = dict(meta or {})
+        meta["adaptive"] = {
+            "system": system_name,
+            "reason": reason,
+            "features": features,
+        }
+        return raw_alloc, meta
+
+    return decision_fn
+
+
 def wrap_with_risk_harness(decision_fn, risk_harness):
     """Applies an optional risk-management layer (see risk_harness.py) on
     top of ANY decision_fn, so the self-improvement structure and the risk
