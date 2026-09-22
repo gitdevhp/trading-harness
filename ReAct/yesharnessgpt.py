@@ -33,6 +33,16 @@ client = OpenAI(
 )
 
 MODEL_NAME = os.environ.get("REACT_MODEL", "Qwen/Qwen3.6-35B-A3B-FP8")
+
+_token_counts = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+
+
+def _track_usage(response):
+    if response.usage:
+        _token_counts["prompt"] += response.usage.prompt_tokens
+        _token_counts["completion"] += response.usage.completion_tokens
+        _token_counts["total"] += response.usage.total_tokens
+        _token_counts["calls"] += 1
 # MODEL_NAME = "Qwen/Qwen2.5-32B-Instruct-AWQ"
 
 
@@ -1075,6 +1085,7 @@ will be normalized to 100%."""
             max_tokens=800,
             stop=["Observation:"],
         )
+        _track_usage(response)
 
         message = response.choices[0].message
 
@@ -1443,4 +1454,10 @@ if __name__ == "__main__":
         args.output,
         args.rebalance_days,
         args.warmup_days,
+    )
+    print(
+        f"\n[TOKEN USAGE] calls={_token_counts['calls']}  "
+        f"prompt={_token_counts['prompt']:,}  "
+        f"completion={_token_counts['completion']:,}  "
+        f"total={_token_counts['total']:,}"
     )
