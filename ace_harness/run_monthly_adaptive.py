@@ -23,6 +23,7 @@ from ace_harness.memory import ExperienceMemory
 from ace_harness.agents import Solver, Debater, Consolidator, RiskTuner
 from ace_harness.risk_harness import ConvictionHarness
 from ace_harness import harnesses
+from ace_harness.llm_client import get_token_counts, reset_token_counts
 
 DEFAULT_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ADBE", "QCOM", "TXN",
@@ -59,9 +60,13 @@ def run_adaptive(tickers, start, end, output_dir,
         risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
     )
 
+    reset_token_counts()
     output_file = os.path.join(output_dir, f"{tag}_results.json")
     run_backtest(universe, decision_fn, start, end, initial_capital, output_file, rebalance_days)
+    tok = get_token_counts()
     print(f"[adaptive] done -> {output_file}")
+    print(f"[tokens]   calls={tok['calls']}  prompt={tok['prompt']:,}  "
+          f"completion={tok['completion']:,}  total={tok['total']:,}")
     return output_file
 
 

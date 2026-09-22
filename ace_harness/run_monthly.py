@@ -36,6 +36,7 @@ from ace_harness.risk_harness import (
     GPTInstitutionalRiskHarness, SimpleTrailingRiskHarness, SimpleMomentumHarness, ConvictionHarness,
 )
 from ace_harness import harnesses
+from ace_harness.llm_client import get_token_counts, reset_token_counts
 
 DEFAULT_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ADBE", "QCOM", "TXN",
@@ -140,8 +141,12 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
     else:
         raise ValueError(f"Unknown system: {system}")
 
+    reset_token_counts()
     run_backtest(universe, decision_fn, start, end, initial_capital, output_file, rebalance_days)
+    tok = get_token_counts()
     print(f"[{tag}] done -> {output_file}")
+    print(f"[tokens]   calls={tok['calls']}  prompt={tok['prompt']:,}  "
+          f"completion={tok['completion']:,}  total={tok['total']:,}")
 
 
 def main():

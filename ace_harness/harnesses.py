@@ -592,12 +592,18 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
            - g_ref==False (no actionable fix)        → break, don't consolidate
            - else: pass feedback to next Solver round
 
-      3. CONSOLIDATION gate (peer's policy.memory_decision):
-           admitted AND g_sto AND NOT SATURATED(M)
+      3. CONSOLIDATION gate (Algorithm 2 line 11):
+           admitted AND g_sto AND NOT frozen
+         where frozen is a STICKY flag (Algorithm 2 lines 1 + 15):
+           frozen ← frozen ∨ SATURATED(M)
+         Once True it never resets — matching the algorithm exactly.
 
     All existing systems (baseline, intra, inter, dual_permanent, …) are
     unchanged — this is an addition, not a replacement.
     """
+    # Algorithm 2 line 1: frozen ← false (initialized once, persists across all tasks)
+    _frozen = [False]  # mutable closure cell so decision_fn can update it
+
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         # --- SLOW LOOP (inter-task) -----------------------------------------
         past_dates = sorted(decision_log.keys())
@@ -659,13 +665,15 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
             feedback = review["feedback"]
             direction = review.get("direction")
 
-        # --- CONSOLIDATION gate (AdaReMo Algorithm 2) -------------------------
+        # --- CONSOLIDATION gate (Algorithm 2 line 11) -------------------------
         consolidated = False
-        if admitted and g_sto and not memory.is_saturated():
+        if admitted and g_sto and not _frozen[0]:
             ops = consolidator.consolidate(memory, all_lessons, memory.sections)
             memory.apply_delta_ops(ops)
             consolidated = True
         memory.save(memory_path)
+        # Algorithm 2 line 15: frozen ← frozen ∨ SATURATED(M) — monotonic, never resets
+        _frozen[0] = _frozen[0] or memory.is_saturated()
 
         meta = {
             "rounds": rounds_log,
