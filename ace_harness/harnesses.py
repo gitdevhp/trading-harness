@@ -571,6 +571,120 @@ def make_dual_permanent_adamo(universe, solver, debater, consolidator, memory, m
     return decision_fn
 
 
+def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
+                   max_rounds: int = 3,
+                   risk_harness=None, risk_tuner=None, risk_params_path=None):
+    """AutoGovern / AdaReMo Algorithm 2 — budget-governed dual-timescale system.
+
+    This is NOT a mode router. Memory is ALWAYS on. The critic governs how
+    many refinement rounds happen and whether to consolidate.
+
+    Structure (mirrors peer's remo/agent.py ReMoAgent.run_task exactly):
+
+      1. SLOW LOOP (inter-task): post_task_reflect on the previous month's
+         realized prices → bullet_checks → Consolidator updates memory.
+         Identical to make_dual_permanent's slow loop.
+
+      2. FAST LOOP (intra-task, K=max_rounds): every round the Solver is
+         conditioned on memory (memory is never switched off):
+           - Solver (memory) → Debater review (also sees memory)
+           - admitted  = (verdict == "accept")      → break, consolidate if g_sto
+           - g_ref==False (no actionable fix)        → break, don't consolidate
+           - else: pass feedback to next Solver round
+
+      3. CONSOLIDATION gate (peer's policy.memory_decision):
+           admitted AND g_sto AND NOT SATURATED(M)
+
+    All existing systems (baseline, intra, inter, dual_permanent, …) are
+    unchanged — this is an addition, not a replacement.
+    """
+    def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
+        # --- SLOW LOOP (inter-task) -----------------------------------------
+        past_dates = sorted(decision_log.keys())
+        if past_dates:
+            prev_date = past_dates[-1]
+            prev = decision_log[prev_date]
+            decision_playbook = (prev.get("meta") or {}).get("playbook_snapshot") or memory.format_for_prompt()
+            realized_prices = universe.close_prices(current_date)
+            reflection = debater.post_task_reflect(
+                prev_date, current_date, prev["targets"], prev["close_prices"], realized_prices,
+                playbook_text=decision_playbook, decision_screener_text=prev.get("screener"),
+            )
+            _apply_bullet_checks(memory, reflection.get("bullet_checks"))
+            ops = consolidator.consolidate(memory, reflection["lessons"], memory.sections)
+            memory.apply_delta_ops(ops)
+            memory.save(memory_path)
+
+            if risk_harness is not None and risk_tuner is not None:
+                deltas = risk_tuner.propose_adjustments(
+                    risk_harness.get_params(), risk_harness.get_param_bounds(),
+                    reflection["lessons"], reflection.get("realized_return_pct", {}),
+                )
+                risk_harness.update_params(deltas)
+                if risk_params_path:
+                    risk_harness.save_params(risk_params_path)
+
+        # --- FAST LOOP (intra-task, K rounds, memory always on) ---------------
+        screener = universe.get_market_screener(current_date)
+        status_text = (f"Portfolio Value: ${portfolio_state['portfolio_value']:,.2f} | "
+                       f"Cash: {portfolio_state['cash_pct']:.1f}%")
+        playbook_text = memory.format_for_prompt()  # snapshot once; same for all rounds
+
+        feedback = None
+        direction = None
+        raw_alloc, rounds_log, all_lessons = None, [], []
+        admitted = False
+        g_sto = False
+
+        for r in range(1, max_rounds + 1):
+            # Solver ALWAYS receives the memory snapshot (never switched off)
+            raw_alloc, _trace = solver.decide(current_date, portfolio_state, rebalance_days,
+                                              playbook_text=playbook_text,
+                                              feedback_text=feedback, direction=direction)
+            review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
+                                               playbook_text=playbook_text, round_num=r)
+            rounds_log.append({"round": r, "allocations": raw_alloc, "review": review})
+            all_lessons.extend(review.get("lessons", []))
+
+            admitted = review["verdict"] == "accept"
+            g_ref = review.get("should_refine", True)   # continue loop?
+            g_sto = review.get("should_store", False)   # worth consolidating?
+
+            if admitted:
+                break  # accepted: done
+
+            if not g_ref:
+                break  # critic: no actionable fix left — stop without admission
+
+            feedback = review["feedback"]
+            direction = review.get("direction")
+
+        # --- CONSOLIDATION gate (AdaReMo Algorithm 2) -------------------------
+        consolidated = False
+        if admitted and g_sto and not memory.is_saturated():
+            ops = consolidator.consolidate(memory, all_lessons, memory.sections)
+            memory.apply_delta_ops(ops)
+            consolidated = True
+        memory.save(memory_path)
+
+        meta = {
+            "rounds": rounds_log,
+            "playbook_snapshot": playbook_text,
+            "admitted": admitted,
+            "consolidated": consolidated,
+            "memory_size": len(memory.bullets),
+        }
+
+        if risk_harness is not None:
+            harnessed = risk_harness.apply(raw_alloc, current_date, portfolio_state["portfolio_value"])
+            meta["pre_harness_allocations"] = raw_alloc
+            meta["risk_params"] = risk_harness.get_params()
+            return harnessed, meta
+
+        return raw_alloc, meta
+    return decision_fn
+
+
 def make_adaptive_router(universe, system_fns: dict, router_fn=None):
     """Adaptive system selector: at each rebalance, computes observable
     universe-structure features and routes to the best-fit system.

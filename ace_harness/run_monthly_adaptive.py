@@ -1,11 +1,13 @@
 """
-Adaptive routing backtest: at each rebalance, selects between HARNESS,
-DEBATER, MEMORY, and ACE based on observable universe-structure features
-(momentum breadth, universe size). All four candidate systems share the
-same Solver, Debater, Consolidator, and persistent ExperienceMemory, so
-the memory accumulated by ACE periods is available to DEBATER periods and
-vice-versa. The ConvictionHarness is applied inside each sub-system's
-decision_fn; the adaptive router wraps on top.
+AutoGovern backtest: a single unified dual-timescale system where memory
+is ALWAYS on and the critic governs how many refinement rounds happen and
+whether to consolidate (AdaReMo Algorithm 2).
+
+This is NOT a mode router. At every rebalance:
+  1. Slow loop: post_task_reflect on realized outcomes → memory update
+  2. Fast loop (K=3 rounds max): Solver (conditioned on memory) →
+     Debater review → break on admitted OR g_ref=False
+  3. Consolidate only if: admitted AND g_sto AND not SATURATED(M)
 
 Usage:
     python -m ace_harness.run_monthly_adaptive \
@@ -42,8 +44,7 @@ def run_adaptive(tickers, start, end, output_dir,
     debater = Debater()
     consolidator = Consolidator()
 
-    # Shared persistent memory — all four systems read/write the same playbook
-    tag = "monthly_adaptive_convictionriskharness_adaptive"
+    tag = "monthly_adaptive_autogover"
     memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
     memory = ExperienceMemory.load(memory_path) if os.path.exists(memory_path) else ExperienceMemory()
 
@@ -51,31 +52,12 @@ def run_adaptive(tickers, start, end, output_dir,
     risk_params_path = os.path.join(output_dir, f"{tag}_riskparams.json")
     risk_tuner = RiskTuner()
 
-    # Build each candidate system; all share the same memory, debater, risk_harness
-    harness_fn = harnesses.make_baseline(universe, solver)
-    harness_fn = harnesses.wrap_with_risk_harness(harness_fn, risk_harness)
-
-    debater_fn = harnesses.make_intra_task(universe, solver, debater, max_rounds=3)
-    debater_fn = harnesses.wrap_with_risk_harness(debater_fn, risk_harness)
-
-    memory_fn = harnesses.make_memory_only(
+    # Single unified AutoGovern system — no routing between modes
+    decision_fn = harnesses.make_autogover(
         universe, solver, debater, consolidator, memory, memory_path,
+        max_rounds=3,
         risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
     )
-
-    ace_fn = harnesses.make_dual_permanent(
-        universe, solver, debater, consolidator, memory, memory_path,
-        risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
-    )
-
-    system_fns = {
-        "harness": harness_fn,
-        "debater": debater_fn,
-        "memory":  memory_fn,
-        "ace":     ace_fn,
-    }
-
-    decision_fn = harnesses.make_adaptive_router(universe, system_fns)
 
     output_file = os.path.join(output_dir, f"{tag}_results.json")
     run_backtest(universe, decision_fn, start, end, initial_capital, output_file, rebalance_days)
@@ -84,7 +66,7 @@ def run_adaptive(tickers, start, end, output_dir,
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Adaptive system-routing backtest")
+    parser = argparse.ArgumentParser(description="AutoGovern (AdaReMo Algorithm 2) backtest")
     parser.add_argument("--tickers", nargs="+", default=DEFAULT_UNIVERSE)
     parser.add_argument("--start", type=str, default="2024-01-01")
     parser.add_argument("--end", type=str, default="2024-12-31")
