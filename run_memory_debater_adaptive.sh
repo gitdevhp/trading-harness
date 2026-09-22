@@ -248,9 +248,9 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
     echo ""
     echo "--- Metrics + plot: ${UNIVERSE_TAG} ---"
 
-    # Collect all result JSONs for this universe
+    # Collect all result JSONs for this universe (all 4 systems)
     ALL_RESULTS=()
-    for SUBDIR in memory debater dual; do
+    for SUBDIR in memory debater dual adaptive; do
         while IFS= read -r -d '' f; do
             ALL_RESULTS+=("$f")
         done < <(find "${UNI_DIR}/${SUBDIR}" -name "*_results.json" -print0 2>/dev/null)
