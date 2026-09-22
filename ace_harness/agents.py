@@ -356,10 +356,12 @@ If you argue "decrease_risk", you MUST cite the SPECIFIC screener metric and val
 Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
 {_LESSON_QUALITY_BAR}
 
-Also output "should_store": true if at least one lesson is genuinely novel relative to the existing playbook, false if the lessons are already well-covered (saves a Consolidator call).
+Also output "should_store": true if at least one lesson is genuinely novel relative to the existing playbook, false if the lessons are already well-covered (saves a Consolidator call). Default to false — only true when you can articulate why this is meaningfully new.
+
+Also output "should_refine": true if your "revise" feedback is specific and actionable enough that another Solver round would plausibly improve the proposal; false if the remaining disagreement is minor, unresolvable, or already handled by the risk harness (signals that further debate rounds have diminishing returns). If verdict is "accept", set should_refine to false.
 
 Respond ONLY with JSON, no other text:
-{{"verdict": "accept" or "revise", "direction": "increase_conviction" or "decrease_risk" or "well_calibrated", "feedback": "1-3 sentences making your strongest argument in that direction, or why you concede it", "lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}], "should_store": true or false}}"""
+{{"verdict": "accept" or "revise", "direction": "increase_conviction" or "decrease_risk" or "well_calibrated", "feedback": "1-3 sentences making your strongest argument in that direction, or why you concede it", "lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}], "should_store": true or false, "should_refine": true or false}}"""
         user_prompt = f"""Date: {current_date}
 Market screener:
 {screener_text}
@@ -376,16 +378,20 @@ Proposed target allocations: {proposed_allocations}"""
         if direction not in ("increase_conviction", "decrease_risk", "well_calibrated"):
             direction = "well_calibrated"
         # g_sto (AdaReMo Algorithm 2): should the lessons from this round be
-        # stored in persistent memory? The Debater returns False when it judges
-        # all lessons already covered by existing playbook bullets — avoiding
-        # a Consolidator call and keeping the playbook compact.
-        should_store = bool(parsed.get("should_store", True))
+        # stored in persistent memory? Default False (conservative): only store
+        # when the Debater explicitly confirms the lessons are novel.
+        should_store = bool(parsed.get("should_store", False))
+        # g_ref (AdaReMo Algorithm 2): should the refinement loop continue?
+        # False when the critic has no actionable fix to offer — stop early
+        # even if verdict is "revise" (0 additional rounds needed).
+        should_refine = bool(parsed.get("should_refine", True))
         return {
             "verdict": parsed.get("verdict", "accept"),
             "direction": direction,
             "feedback": parsed.get("feedback", ""),
             "lessons": _normalize_lessons(parsed.get("lessons")),
             "should_store": should_store,
+            "should_refine": should_refine,
         }
 
     def post_task_reflect(self, decision_date, next_date, executed_allocations,

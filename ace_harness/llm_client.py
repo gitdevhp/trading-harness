@@ -14,6 +14,9 @@ CONSOLIDATOR_MODEL = os.environ.get("ACE_CONSOLIDATOR_MODEL", SOLVER_MODEL)
 
 _client = None
 
+# Cumulative token usage across all chat() calls in this process.
+_token_counts = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+
 
 def get_client():
     global _client
@@ -22,11 +25,28 @@ def get_client():
     return _client
 
 
+def get_token_counts() -> dict:
+    """Return a copy of cumulative token counts since process start (or last reset)."""
+    return dict(_token_counts)
+
+
+def reset_token_counts():
+    """Reset counters to zero (call between backtests if running multiple in one process)."""
+    _token_counts.update({"prompt": 0, "completion": 0, "total": 0, "calls": 0})
+
+
 def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
     response = get_client().chat.completions.create(
         model=model, messages=messages, temperature=temperature,
         max_tokens=max_tokens, stop=stop,
     )
+    # Accumulate token usage if the server reports it (vLLM always does).
+    usage = getattr(response, "usage", None)
+    if usage is not None:
+        _token_counts["prompt"]     += getattr(usage, "prompt_tokens", 0) or 0
+        _token_counts["completion"] += getattr(usage, "completion_tokens", 0) or 0
+        _token_counts["total"]      += getattr(usage, "total_tokens", 0) or 0
+    _token_counts["calls"] += 1
     msg = response.choices[0].message
     # Primary: content field.
     text = (msg.content or "").strip()
