@@ -332,13 +332,19 @@ class Debater:
         if n_universe_stocks and n_universe_stocks > 0:
             eq_wt = round(100.0 / n_universe_stocks, 1)
             large_threshold = round(2.5 * eq_wt, 1)
+            accept_threshold = round(1.5 * eq_wt, 1)
             sizing_context = (
                 f"\nUniverse size: {n_universe_stocks} stocks. "
                 f"Equal-weight baseline = {eq_wt:.1f}% per stock. "
                 f"Only challenge a position when it deviates meaningfully from this baseline — "
                 f"a 'large' position for this universe means >{large_threshold:.1f}% (2.5× equal weight). "
                 f"Positions near equal weight are NORMAL here and must not be challenged "
-                f"without a specific negative screener signal."
+                f"without a specific negative screener signal. "
+                f"ACCEPT THRESHOLD: for a stock with strong positive momentum (1M-Mom > 15% AND "
+                f"6M-Mom > 25% AND price above 200d SMA), an allocation of ≥{accept_threshold:.1f}% "
+                f"(1.5× equal weight) is already meaningful conviction — set verdict='accept'. "
+                f"Do not demand allocations beyond 2× equal weight; portfolio diversification and "
+                f"risk constraints are handled by the risk harness after this step."
             )
         else:
             sizing_context = ""

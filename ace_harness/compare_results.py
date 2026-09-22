@@ -131,6 +131,15 @@ def metrics(records, bench_nav=None):
     }
 
 
+def _load_token_usage(data):
+    """Extract token_usage dict from result JSON if present."""
+    if isinstance(data, dict):
+        tok = data.get("token_usage")
+        if isinstance(tok, dict):
+            return tok
+    return {}
+
+
 def main():
     import glob
 
@@ -154,6 +163,9 @@ def main():
             label = os.path.splitext(os.path.basename(path))[0]
             label = label.replace("monthly_", "").replace("_results", "")
             m["system"] = label
+            tok = _load_token_usage(data)
+            m["tok_total_k"] = round(tok.get("total_tokens", 0) / 1000, 1) if tok else float("nan")
+            m["tok_calls"] = tok.get("total_calls", 0) if tok else 0
             rows.append(m)
         except FileNotFoundError:
             print(f"{path} -> not found")
@@ -174,6 +186,8 @@ def main():
         ("calmar",           "Calmar",         ">", 8),
         ("alpha_ann_pct",    "Alpha%",         ">", 8),
         ("beta",             "Beta",           ">", 7),
+        ("tok_total_k",      "Tokens(k)",      ">", 10),
+        ("tok_calls",        "LLMCalls",       ">", 10),
     ]
 
     header = "".join(f"{h:{align}{w}}" for _, h, align, w in cols)
@@ -185,7 +199,9 @@ def main():
         line = ""
         for key, _, align, w in cols:
             val = m.get(key, "")
-            if isinstance(val, float):
+            if key == "tok_calls":
+                line += f"{int(val) if val else 0:{align}{w}}"
+            elif isinstance(val, float):
                 line += f"{val:{align}{w}.2f}"
             else:
                 line += f"{val:{align}{w}}"
