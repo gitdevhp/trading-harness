@@ -167,10 +167,16 @@ for SYSTEM in intra memory_only dual_permanent; do
     fi
 done
 
-python -m ace_harness.plot_adaptive \
-    --adaptive_json "$ADAPTIVE_JSON" \
-    ${#BASELINE_ARGS[@]:+--baseline_jsons "${BASELINE_ARGS[@]}"} \
-    --output_png "$OUTPUT_DIR/adaptive_routing.png"
+if [[ ${#BASELINE_ARGS[@]} -gt 0 ]]; then
+    python -m ace_harness.plot_adaptive \
+        --adaptive_json "$ADAPTIVE_JSON" \
+        --baseline_jsons "${BASELINE_ARGS[@]}" \
+        --output_png "$OUTPUT_DIR/adaptive_routing.png"
+else
+    python -m ace_harness.plot_adaptive \
+        --adaptive_json "$ADAPTIVE_JSON" \
+        --output_png "$OUTPUT_DIR/adaptive_routing.png"
+fi
 
 # ── Print metrics summary ──────────────────────────────────────────────────────
 
