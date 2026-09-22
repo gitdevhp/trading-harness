@@ -351,6 +351,11 @@ You must be willing to argue in EITHER direction, based only on what the screene
 You do NOT know future prices — never argue from hindsight, only from what's in the screener right now.
 IMPORTANT: A risk harness (volatility targeting, position caps, drawdown limits) is applied AFTER this proposal is finalized. It already handles generic risk guardrails. Your role is SIGNAL MISREAD detection only: wrong direction on an asset, a missed strong signal that was priced out, or a large position with directly contradictory screener metrics. If the sizing looks reasonable given the signals, concede.
 If you argue "decrease_risk", you MUST cite the SPECIFIC screener metric and value that directly contradicts the proposed position (e.g. "6M-Mom is -8% yet allocated 20%"). Without a named, checkable metric that contradicts the sizing, verdict must be "accept".
+CRITICAL — verdict vs. should_refine: these are independent decisions.
+- verdict="accept": the signal-to-sizing match is reasonable. Use this whenever your only remaining concern is something the risk harness already handles (position caps, volatility limits, drawdown guards) — the harness will correct it, so accept the signal read and let the harness do its job.
+- verdict="revise": there is a genuine, specific signal misread that the Solver can actually fix in the next round (wrong direction, a clearly contradicted large position). Only use "revise" when you have concrete, actionable feedback that the Solver can act on.
+- should_refine=true: your "revise" feedback is specific enough that another round would plausibly improve the proposal.
+- should_refine=false: only pair with verdict="revise" when the disagreement is genuine but unresolvable (e.g. the screener is ambiguous and no rewrite will fix it). Do NOT set should_refine=false just because the risk harness will handle it — in that case, set verdict="accept" instead.
 {sizing_context}
 {memory_block}
 Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared playbook — lessons that argue for sizing up on strong signals are just as valuable as lessons that argue for caution.
@@ -358,7 +363,7 @@ Also propose at most {_MAX_LESSONS_PER_CALL} candidate lessons for the shared pl
 
 Also output "should_store": true if at least one lesson is genuinely novel relative to the existing playbook, false if the lessons are already well-covered (saves a Consolidator call). Default to false — only true when you can articulate why this is meaningfully new.
 
-Also output "should_refine": true if your "revise" feedback is specific and actionable enough that another Solver round would plausibly improve the proposal; false if the remaining disagreement is minor, unresolvable, or already handled by the risk harness (signals that further debate rounds have diminishing returns). If verdict is "accept", set should_refine to false.
+Also output "should_refine": true if your "revise" feedback is specific and actionable enough that another Solver round would plausibly improve the proposal; false if the disagreement is genuine but unresolvable. If verdict is "accept", always set should_refine to false.
 
 Respond ONLY with JSON, no other text:
 {{"verdict": "accept" or "revise", "direction": "increase_conviction" or "decrease_risk" or "well_calibrated", "feedback": "1-3 sentences making your strongest argument in that direction, or why you concede it", "lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}], "should_store": true or false, "should_refine": true or false}}"""
