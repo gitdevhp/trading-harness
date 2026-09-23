@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --time=24:00:00
+#SBATCH --time=36:00:00
 #SBATCH --nodes=1
 #SBATCH --mem=64gb
 #SBATCH --output=log/adaptive_only_%j.out
@@ -8,26 +8,28 @@
 #SBATCH --gres=gpu:a40:1
 #SBATCH --partition=interactive-gpu
 
-# Runs ONLY the adaptive (AutoGovern) system for all 6 universes, then compares
-# its results against existing memory / debater / dual results from a prior run.
+# Completes any missing baseline runs (memory/debater/dual) from a prior job,
+# then runs the adaptive system fresh with the r1-fallback fix, and compares
+# all four systems across every universe.
 #
 # Required env var:
-#   PREV_RUN_DIR   path to the prior ace_mda_* directory that contains
-#                  {universe}/memory/, {universe}/debater/, {universe}/dual/
+#   PREV_RUN_DIR   path to the prior ace_mda_* directory.
+#                  For each universe × system the script checks this directory
+#                  first; only runs the system if the result is absent there.
 #
-# Optional env vars (all have defaults):
-#   OUT_ROOT       where to write new adaptive results
+# Optional env vars:
+#   OUT_ROOT       where to write new results (anything not found in PREV_RUN_DIR)
 #                  default: ${PREV_RUN_DIR}_adaptive_fix_${JOB_ID}
 #   START_DATE     default: 2024-01-01
 #   END_DATE       default: 2024-12-31
 #   INITIAL_CAPITAL  default: 1000000
 #   MAX_TOKENS     default: 800
 #
-# Output structure (under OUT_ROOT):
-#   {universe}/adaptive/   ← new AutoGovern results
+# Logic per system per universe:
+#   memory / debater / dual  — check PREV_RUN_DIR; if found, skip; else run → OUT_ROOT
+#   adaptive                 — always run fresh → OUT_ROOT (old run had broken r3 fallback)
 #
-# The compare step reads memory/debater/dual from PREV_RUN_DIR and adaptive
-# from OUT_ROOT, so you get a clean 4-way comparison in one table.
+# Compare step resolves each system's result from whichever dir has it.
 
 set -euo pipefail
 
@@ -87,33 +89,48 @@ get_tickers() {
     esac
 }
 
+# find_result <base_dir> <universe> <subdir>
+# Prints the first matching *_results.json path, or empty string if none found.
+find_result() {
+    local base="$1" uni="$2" subdir="$3"
+    find "${base}/${uni}/${subdir}" -name "*_results.json" -print 2>/dev/null | head -1
+}
+
 mkdir -p "$OUT_ROOT"
 
 echo "=========================================="
-echo "ACE — ADAPTIVE ONLY (r1-fallback fix)"
+echo "ACE — baseline fill-in + adaptive (r1-fallback fix)"
 echo "=========================================="
 echo "Job:          ${JOB_ID}"
 echo "Model:        ${MODEL}"
-echo "System:       adaptive / AutoGovern (Algorithm 2 + r1 fallback)"
 echo "Universes:    ${UNIVERSE_TAGS[*]}"
 echo "Period:       ${START_DATE} -> ${END_DATE}"
 echo "Capital:      \$${INITIAL_CAPITAL}"
 echo "Max tokens:   ${MAX_TOKENS}"
-echo "Baselines:    ${PREV_RUN_DIR}/"
-echo "Output:       ${OUT_ROOT}/"
+echo "Prior run:    ${PREV_RUN_DIR}/"
+echo "New output:   ${OUT_ROOT}/"
 echo "=========================================="
 
-# ── Check which universes still need running ───────────────────────────────────
+# ── Audit what's missing so we know whether to start vLLM ────────────────────
+echo ""
+echo "Auditing existing results..."
 NEED_LLM=false
 for TAG in "${UNIVERSE_TAGS[@]}"; do
-    ADAPTIVE_JSON="${OUT_ROOT}/${TAG}/adaptive/monthly_adaptive_autogover_results.json"
-    if [[ ! -f "$ADAPTIVE_JSON" ]]; then
-        NEED_LLM=true
-        break
-    fi
+    for SUBDIR in memory debater dual; do
+        if [[ -z "$(find_result "$PREV_RUN_DIR" "$TAG" "$SUBDIR")" ]] && \
+           [[ -z "$(find_result "$OUT_ROOT"     "$TAG" "$SUBDIR")" ]]; then
+            echo "  MISSING: ${TAG}/${SUBDIR} (will run)"
+            NEED_LLM=true
+        else
+            echo "  found:   ${TAG}/${SUBDIR}"
+        fi
+    done
+    # Adaptive is always re-run (old results have wrong r3-fallback behavior)
+    echo "  will run: ${TAG}/adaptive (always fresh)"
+    NEED_LLM=true
 done
 
-# ── Start vLLM (only if needed) ───────────────────────────────────────────────
+# ── Start vLLM ────────────────────────────────────────────────────────────────
 VLLM_PID=""
 
 cleanup() {
@@ -126,6 +143,7 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ "$NEED_LLM" == "true" ]]; then
+    echo ""
     echo "Starting vLLM server..."
     vllm serve "$MODEL" \
         --host 127.0.0.1 \
@@ -149,11 +167,9 @@ if [[ "$NEED_LLM" == "true" ]]; then
         sleep 5
     done
     echo "vLLM online."
-else
-    echo "[resume] All adaptive results already exist — skipping vLLM startup."
 fi
 
-# ── Main loop: one universe at a time ─────────────────────────────────────────
+# ── Main loop ─────────────────────────────────────────────────────────────────
 for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
     TICKERS=$(get_tickers "$UNIVERSE_TAG")
     read -ra TICKER_ARRAY <<< "$TICKERS"
@@ -163,12 +179,89 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
     echo "Universe: ${UNIVERSE_TAG}  (${#TICKER_ARRAY[@]} stocks)"
     echo "=========================================="
 
-    # ── ADAPTIVE ──────────────────────────────────────────────────────────────
+    # ── MEMORY ────────────────────────────────────────────────────────────────
+    MEM_JSON="$(find_result "$PREV_RUN_DIR" "$UNIVERSE_TAG" "memory")"
+    if [[ -z "$MEM_JSON" ]]; then
+        MEM_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "memory")"
+    fi
+    if [[ -n "$MEM_JSON" ]]; then
+        echo "  [skip] MEMORY — found: ${MEM_JSON}"
+    else
+        echo ""
+        echo "--- Running MEMORY (memory_only) ---"
+        MEM_DIR="${OUT_ROOT}/${UNIVERSE_TAG}/memory"
+        mkdir -p "$MEM_DIR"
+        python -m ace_harness.run_monthly \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start "$START_DATE" \
+            --end   "$END_DATE" \
+            --systems memory_only \
+            --output_dir "$MEM_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --fallback_mode equal_weight \
+            --max_tokens "$MAX_TOKENS"
+        MEM_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "memory")"
+        echo "Done -> ${MEM_DIR}/"
+    fi
+
+    # ── DEBATER ───────────────────────────────────────────────────────────────
+    DEB_JSON="$(find_result "$PREV_RUN_DIR" "$UNIVERSE_TAG" "debater")"
+    if [[ -z "$DEB_JSON" ]]; then
+        DEB_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "debater")"
+    fi
+    if [[ -n "$DEB_JSON" ]]; then
+        echo "  [skip] DEBATER — found: ${DEB_JSON}"
+    else
+        echo ""
+        echo "--- Running DEBATER (intra) ---"
+        DEB_DIR="${OUT_ROOT}/${UNIVERSE_TAG}/debater"
+        mkdir -p "$DEB_DIR"
+        python -m ace_harness.run_monthly \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start "$START_DATE" \
+            --end   "$END_DATE" \
+            --systems intra \
+            --output_dir "$DEB_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --fallback_mode equal_weight \
+            --max_tokens "$MAX_TOKENS"
+        DEB_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "debater")"
+        echo "Done -> ${DEB_DIR}/"
+    fi
+
+    # ── DUAL ──────────────────────────────────────────────────────────────────
+    DUAL_JSON="$(find_result "$PREV_RUN_DIR" "$UNIVERSE_TAG" "dual")"
+    if [[ -z "$DUAL_JSON" ]]; then
+        DUAL_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "dual")"
+    fi
+    if [[ -n "$DUAL_JSON" ]]; then
+        echo "  [skip] DUAL — found: ${DUAL_JSON}"
+    else
+        echo ""
+        echo "--- Running DUAL (fixed ReMo) ---"
+        DUAL_DIR="${OUT_ROOT}/${UNIVERSE_TAG}/dual"
+        mkdir -p "$DUAL_DIR"
+        python -m ace_harness.run_monthly \
+            --tickers "${TICKER_ARRAY[@]}" \
+            --start "$START_DATE" \
+            --end   "$END_DATE" \
+            --systems dual \
+            --output_dir "$DUAL_DIR" \
+            --risk_harness_type conviction \
+            --initial_capital "$INITIAL_CAPITAL" \
+            --fallback_mode equal_weight \
+            --max_tokens "$MAX_TOKENS"
+        DUAL_JSON="$(find_result "$OUT_ROOT" "$UNIVERSE_TAG" "dual")"
+        echo "Done -> ${DUAL_DIR}/"
+    fi
+
+    # ── ADAPTIVE (always fresh — old run had r3-fallback bug) ─────────────────
     ADAPTIVE_DIR="${OUT_ROOT}/${UNIVERSE_TAG}/adaptive"
     ADAPTIVE_JSON="${ADAPTIVE_DIR}/monthly_adaptive_autogover_results.json"
-
     if [[ -f "$ADAPTIVE_JSON" ]]; then
-        echo "  [skip] ADAPTIVE — results already exist"
+        echo "  [skip] ADAPTIVE — results already exist in OUT_ROOT"
     else
         echo ""
         echo "--- Running ADAPTIVE (r1 fallback fix) ---"
@@ -185,30 +278,23 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
         echo "Done -> ${ADAPTIVE_DIR}/"
     fi
 
-    # ── Per-universe compare: adaptive (new) vs baselines (prev run) ──────────
+    # ── Per-universe compare ───────────────────────────────────────────────────
     echo ""
     echo "--- Metrics + compare: ${UNIVERSE_TAG} ---"
 
     ALL_RESULTS=()
-    # Baselines from the prior run
-    for SUBDIR in memory debater dual; do
-        while IFS= read -r -d '' f; do
-            ALL_RESULTS+=("$f")
-        done < <(find "${PREV_RUN_DIR}/${UNIVERSE_TAG}/${SUBDIR}" -name "*_results.json" -print0 2>/dev/null)
-    done
-    # New adaptive result
+    [[ -n "$MEM_JSON" ]]   && ALL_RESULTS+=("$MEM_JSON")
+    [[ -n "$DEB_JSON" ]]   && ALL_RESULTS+=("$DEB_JSON")
+    [[ -n "$DUAL_JSON" ]]  && ALL_RESULTS+=("$DUAL_JSON")
     [[ -f "$ADAPTIVE_JSON" ]] && ALL_RESULTS+=("$ADAPTIVE_JSON")
 
     if [[ ${#ALL_RESULTS[@]} -gt 0 ]]; then
         python -m ace_harness.compare_results "${ALL_RESULTS[@]}" || true
     fi
 
-    # plot_adaptive with prior baselines
+    # plot_adaptive
     if [[ -f "$ADAPTIVE_JSON" ]]; then
         BASELINE_ARGS=()
-        MEM_JSON=$(find "${PREV_RUN_DIR}/${UNIVERSE_TAG}/memory"   -name "*_results.json" 2>/dev/null | head -1)
-        DEB_JSON=$(find "${PREV_RUN_DIR}/${UNIVERSE_TAG}/debater"  -name "*_results.json" 2>/dev/null | head -1)
-        DUAL_JSON=$(find "${PREV_RUN_DIR}/${UNIVERSE_TAG}/dual"    -name "*_results.json" 2>/dev/null | head -1)
         [[ -n "$MEM_JSON" ]]  && BASELINE_ARGS+=("$MEM_JSON")
         [[ -n "$DEB_JSON" ]]  && BASELINE_ARGS+=("$DEB_JSON")
         [[ -n "$DUAL_JSON" ]] && BASELINE_ARGS+=("$DUAL_JSON")
@@ -229,7 +315,7 @@ for UNIVERSE_TAG in "${UNIVERSE_TAGS[@]}"; do
     echo "Universe ${UNIVERSE_TAG} complete."
 done
 
-# ── Cross-universe summary: new adaptive vs prior baselines ───────────────────
+# ── Cross-universe summary ─────────────────────────────────────────────────────
 echo ""
 echo "=========================================="
 echo "CROSS-UNIVERSE METRICS SUMMARY"
@@ -241,21 +327,17 @@ import glob, json, math, os, statistics
 prev_run_dir = os.environ.get("PREV_RUN_DIR", "")
 out_root     = "${OUT_ROOT}"
 universes    = ["tech18", "mag7", "balanced15", "sp30", "diversified40", "volatile25"]
+systems      = ["memory", "debater", "dual", "adaptive"]
+labels       = {"memory": "MEMORY", "debater": "DEBATER", "dual": "DUAL", "adaptive": "ADAPTIVE"}
 
-# (base_dir, subdir, label)
-systems = [
-    (prev_run_dir, "memory",   "MEMORY"),
-    (prev_run_dir, "debater",  "DEBATER"),
-    (prev_run_dir, "dual",     "DUAL"),
-    (out_root,     "adaptive", "ADAPTIVE"),
-]
-
-def load_result(base, subdir, uni):
-    matches = glob.glob(os.path.join(base, uni, subdir, "*_results.json"))
-    if not matches:
-        return None, None
-    with open(matches[0]) as f:
-        return matches[0], json.load(f)
+def find_result(uni, subdir):
+    """Check PREV_RUN_DIR first (except adaptive), then OUT_ROOT."""
+    for base in ([prev_run_dir, out_root] if subdir != "adaptive" else [out_root]):
+        matches = glob.glob(os.path.join(base, uni, subdir, "*_results.json"))
+        if matches:
+            with open(matches[0]) as f:
+                return json.load(f)
+    return None
 
 def perf_metrics(data):
     history = data if isinstance(data, list) else data.get("history", [])
@@ -282,14 +364,14 @@ hdr = f"{'Universe':<15} {'System':<10} {'TotalRet':>9} {'Sharpe':>7} {'MaxDD':>
 print(hdr)
 print("-" * len(hdr))
 for uni in universes:
-    for base, subdir, label in systems:
-        _, data = load_result(base, subdir, uni)
+    for subdir in systems:
+        data = find_result(uni, subdir)
         if data is None:
             continue
         m = perf_metrics(data)
         if m:
             tr, sh, dd, ca = m
-            print(f"{uni:<15} {label:<10} {tr:>8.2f}% {sh:>7.2f} {dd:>7.2f}% {ca:>7.2f}")
+            print(f"{uni:<15} {labels[subdir]:<10} {tr:>8.2f}% {sh:>7.2f} {dd:>7.2f}% {ca:>7.2f}")
     print()
 
 print()
@@ -298,10 +380,10 @@ thdr = f"{'Universe':<15} {'System':<10} {'Calls':>7} {'Prompt':>12} {'Completio
 print(thdr)
 print("-" * len(thdr))
 
-grand = {label: {"calls": 0, "prompt": 0, "completion": 0, "total": 0} for _, _, label in systems}
+grand = {s: {"calls": 0, "prompt": 0, "completion": 0, "total": 0} for s in systems}
 for uni in universes:
-    for base, subdir, label in systems:
-        _, data = load_result(base, subdir, uni)
+    for subdir in systems:
+        data = find_result(uni, subdir)
         if data is None:
             continue
         tok = data.get("token_usage") if isinstance(data, dict) else None
@@ -311,25 +393,25 @@ for uni in universes:
         prompt = tok.get("prompt", 0)
         comp = tok.get("completion", 0)
         total = tok.get("total", 0)
-        print(f"{uni:<15} {label:<10} {calls:>7,} {prompt:>12,} {comp:>12,} {total:>12,}")
-        grand[label]["calls"]      += calls
-        grand[label]["prompt"]     += prompt
-        grand[label]["completion"] += comp
-        grand[label]["total"]      += total
+        print(f"{uni:<15} {labels[subdir]:<10} {calls:>7,} {prompt:>12,} {comp:>12,} {total:>12,}")
+        grand[subdir]["calls"]      += calls
+        grand[subdir]["prompt"]     += prompt
+        grand[subdir]["completion"] += comp
+        grand[subdir]["total"]      += total
     print()
 
 print("TOTALS ACROSS ALL UNIVERSES")
 print("-" * len(thdr))
-for _, _, label in systems:
-    g = grand[label]
+for subdir in systems:
+    g = grand[subdir]
     if g["calls"] == 0:
         continue
-    print(f"{'ALL':<15} {label:<10} {g['calls']:>7,} {g['prompt']:>12,} {g['completion']:>12,} {g['total']:>12,}")
+    print(f"{'ALL':<15} {labels[subdir]:<10} {g['calls']:>7,} {g['prompt']:>12,} {g['completion']:>12,} {g['total']:>12,}")
 PYEOF
 
 echo ""
 echo "=========================================="
-echo "ADAPTIVE-ONLY RUN COMPLETE"
-echo "New adaptive results: ${OUT_ROOT}/"
-echo "Baselines from:       ${PREV_RUN_DIR}/"
+echo "RUN COMPLETE"
+echo "New results:  ${OUT_ROOT}/"
+echo "Baselines:    ${PREV_RUN_DIR}/"
 echo "=========================================="
