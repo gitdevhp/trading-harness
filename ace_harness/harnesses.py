@@ -646,6 +646,7 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
         raw_alloc, rounds_log, all_lessons = None, [], []
         admitted = False
         g_sto = False
+        r1_alloc = None  # first-round allocation; fallback if rounds exhaust without admission
 
         print(f"[autogov] {current_date} fast-loop start  frozen={_frozen[0]}  mem_bullets={len(memory.bullets)}")
         for r in range(1, max_rounds + 1):
@@ -653,6 +654,8 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
             raw_alloc, _trace = solver.decide(current_date, portfolio_state, rebalance_days,
                                               playbook_text=playbook_text,
                                               feedback_text=feedback, direction=direction)
+            if r == 1:
+                r1_alloc = raw_alloc  # capture before any feedback conditioning
             review = debater.intra_task_review(current_date, screener, status_text, raw_alloc,
                                                playbook_text=playbook_text, round_num=r,
                                                n_universe_stocks=n_stocks)
@@ -676,7 +679,15 @@ def make_autogover(universe, solver, debater, consolidator, memory, memory_path,
             feedback = review["feedback"]
             direction = review.get("direction")
 
-        print(f"[autogov]   result: admitted={admitted}  g_sto={g_sto}  frozen={_frozen[0]}")
+        # When rounds exhaust without admission, submit r1 (the Solver's first
+        # unconstrained attempt) rather than rK (multiply-revised by contradictory
+        # feedback).  Algorithm 2 doesn't specify which round's output to use on
+        # exhaustion; r1 is empirically more reliable than a round pulled in
+        # contradictory directions by oscillating increase_conviction/decrease_risk.
+        if not admitted and r1_alloc is not None:
+            raw_alloc = r1_alloc
+
+        print(f"[autogov]   result: admitted={admitted}  g_sto={g_sto}  frozen={_frozen[0]}  submitted_round={'admitted' if admitted else 'r1-fallback'}")
 
         # --- CONSOLIDATION gate (Algorithm 2 line 11) -------------------------
         # admitted AND g_sto AND NOT frozen — strict per the paper.
