@@ -164,8 +164,8 @@ def main():
             label = label.replace("monthly_", "").replace("_results", "")
             m["system"] = label
             tok = _load_token_usage(data)
-            m["tok_total_k"] = round(tok.get("total_tokens", 0) / 1000, 1) if tok else float("nan")
-            m["tok_calls"] = tok.get("total_calls", 0) if tok else 0
+            m["tok_total_k"] = round(tok.get("total", tok.get("total_tokens", 0)) / 1000, 1) if tok else float("nan")
+            m["tok_calls"] = tok.get("calls", tok.get("total_calls", 0)) if tok else 0
             rows.append(m)
         except FileNotFoundError:
             print(f"{path} -> not found")
