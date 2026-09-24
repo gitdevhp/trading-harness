@@ -36,6 +36,9 @@ def reset_token_counts():
 
 
 def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
+    _env_temp = os.environ.get("ACE_TEMPERATURE")
+    if _env_temp is not None:
+        temperature = float(_env_temp)
     response = get_client().chat.completions.create(
         model=model, messages=messages, temperature=temperature,
         max_tokens=max_tokens, stop=stop,
