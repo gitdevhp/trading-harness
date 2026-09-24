@@ -96,7 +96,9 @@ get_tickers() {
 # Prints the first matching *_results.json path, or empty string if none found.
 find_result() {
     local base="$1" uni="$2" subdir="$3"
-    find "${base}/${uni}/${subdir}" -name "*_results.json" -print 2>/dev/null | head -1
+    local dir="${base}/${uni}/${subdir}"
+    [[ -d "$dir" ]] || return 0
+    find "$dir" -name "*_results.json" -print -quit 2>/dev/null
 }
 
 mkdir -p "$OUT_ROOT"
