@@ -1,4 +1,10 @@
 """
+LEGACY ADAP-v1 — kept unchanged so the original ADAP rows can be reproduced.
+For the paper use `python -m ace_harness.run_monthly --systems adap_v2`
+(ADAP-v2), which removes v1's non-governance differences from DUAL: the
+round-1 submission when the critic does not accept, the ADAP-only critic
+prompt (n_universe_stocks), and the always-on RiskTuner.
+
 AutoGovern backtest: a single unified dual-timescale system where memory
 is ALWAYS on and the critic governs how many refinement rounds happen and
 whether to consolidate (AdaReMo Algorithm 2).
@@ -15,16 +21,13 @@ Usage:
         --start 2024-01-01 --end 2024-12-31 --output_dir ./results
 """
 import argparse
-import json
 import os
 
 from ace_harness.market import MarketUniverse
-from ace_harness.engine_monthly import run_backtest
-from ace_harness.memory import ExperienceMemory
 from ace_harness.agents import Solver, Debater, Consolidator, RiskTuner
 from ace_harness.risk_harness import ConvictionHarness
-from ace_harness import harnesses
-from ace_harness.llm_client import get_token_counts, reset_token_counts
+from ace_harness import accounting, harnesses
+from ace_harness.run_monthly import execute
 
 DEFAULT_UNIVERSE = [
     "AAPL", "MSFT", "NVDA", "AVGO", "AMD", "ADBE", "QCOM", "TXN",
@@ -35,8 +38,8 @@ DEFAULT_UNIVERSE = [
 def run_adaptive(tickers, start, end, output_dir,
                  initial_capital=1_000_000.0, rebalance_days=20,
                  include_screener_tool=True, fallback_mode="equal_weight",
-                 truncate_context=False, max_tokens=800):
-
+                 truncate_context=False, max_tokens=800, resume_memory=False):
+    run_args = dict(locals())
     universe = MarketUniverse(tickers)
     universe.prefetch(start, end)
 
@@ -48,7 +51,7 @@ def run_adaptive(tickers, start, end, output_dir,
 
     tag = "monthly_adaptive_autogover"
     memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
-    memory = ExperienceMemory.load(memory_path) if os.path.exists(memory_path) else ExperienceMemory()
+    memory, mem_info = accounting.prepare_memory(memory_path, resume=resume_memory)
 
     risk_harness = ConvictionHarness(universe)
     risk_params_path = os.path.join(output_dir, f"{tag}_riskparams.json")
@@ -61,23 +64,10 @@ def run_adaptive(tickers, start, end, output_dir,
         risk_harness=risk_harness, risk_tuner=risk_tuner, risk_params_path=risk_params_path,
     )
 
-    reset_token_counts()
     output_file = os.path.join(output_dir, f"{tag}_results.json")
-    run_backtest(universe, decision_fn, start, end, initial_capital, output_file, rebalance_days)
-    tok = get_token_counts()
-    print(f"[adaptive] done -> {output_file}")
-    print(f"[tokens]   calls={tok['calls']}  prompt={tok['prompt']:,}  "
-          f"completion={tok['completion']:,}  total={tok['total']:,}")
-    # Persist token counts into the result JSON for cross-run comparison.
-    try:
-        with open(output_file) as fh:
-            result = json.load(fh)
-        if isinstance(result, dict):
-            result["token_usage"] = tok
-            with open(output_file, "w") as fh:
-                json.dump(result, fh, indent=2, allow_nan=False)
-    except Exception:
-        pass
+    execute(universe, decision_fn, start, end, initial_capital, output_file, rebalance_days,
+            "adaptive_v1", run_args, risk_harness=risk_harness,
+            extra_manifest={"tag": tag, "risk_tuner": True, "legacy": "ADAP-v1", **mem_info}, label="adaptive")
     return output_file
 
 
@@ -93,6 +83,8 @@ def main():
     parser.add_argument("--fallback_mode", choices=["cash", "equal_weight"], default="equal_weight")
     parser.add_argument("--truncate_context", action="store_true")
     parser.add_argument("--max_tokens", type=int, default=800)
+    parser.add_argument("--resume_memory", action="store_true",
+                        help="load an existing playbook (only to warm-start a NEW period)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -101,6 +93,7 @@ def main():
         initial_capital=args.initial_capital, rebalance_days=args.rebalance_days,
         include_screener_tool=not args.no_screener, fallback_mode=args.fallback_mode,
         truncate_context=args.truncate_context, max_tokens=args.max_tokens,
+        resume_memory=args.resume_memory,
     )
 
 

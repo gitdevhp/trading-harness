@@ -644,6 +644,7 @@ if __name__ == "__main__":
     run_one("dual_permanent", use_risk_harness=True, risk_harness_cls=SimpleTrailingRiskHarness,
             include_screener_tool=False)
     run_monthly_one()
-    from ace_harness.tests import test_core
+    from ace_harness.tests import test_core, test_v2
     test_core.run_all()
+    test_v2.run_all()
     print("SMOKE TEST PASSED")
