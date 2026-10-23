@@ -148,12 +148,56 @@ def test_fresh_memory_guard():
     print("[accounting] stale playbook moved aside by default; loaded only with resume=True")
 
 
+def test_make_table_merges_new_cells_into_base():
+    """New cells replace base rows; other base rows are kept verbatim; ReAct
+    dict outputs and ace list outputs are both read; tokens come from sidecars."""
+    from ace_harness import accounting, engine_monthly, make_table
+    from ace_harness.compare_results import metrics
+
+    base_text = (
+        "RUN 1\n" + "\t".join(make_table.HEADER) + "\n"
+        "qwen25\tQWEN\ttech18\t35.69\t35.83\t21.41\t1.54\t1.64\t2.13\t-16.85\t\t\t\t\n"
+        "qwen25\tHARNESS+DEBATER\tsp30\t53.58\t53.84\t24.61\t1.88\t1.92\t3.23\t-16.65\t131\t299597\t23551\t323148\n"
+        "qwen25\tADAP\ttech18\t38.01\t38.18\t26.87\t1.34\t1.31\t2\t-19.1\t137\t286000\t24479\t310479\n"
+    )
+    u = gu.make_universe()
+    with with_real_chat(gu.HashChat(u.anon_universe)), tempfile.TemporaryDirectory() as tmp:
+        cell = os.path.join(tmp, "run1", "sp30", "debater")
+        os.makedirs(cell)
+        out = os.path.join(cell, "monthly_intra_convictionriskharness_results.json")
+        fn = accounting.wrap_with_decision_log(gu.build_decision_fn("intra", u, tmp),
+                                               accounting.sidecar_paths(out)["decisions"], u)
+        results = engine_monthly.run_backtest(u, fn, "2024-01-02", "2024-12-31", 1e6, out, 20)
+        accounting.write_tokens_sidecar(out, fn.per_task)
+        react_cell = os.path.join(tmp, "run1", "sp30", "qwen")
+        os.makedirs(react_cell)
+        with open(os.path.join(react_cell, "qwen_results_raw.json"), "w") as f:
+            json.dump({"summary": {}, "rebalances": [], "daily_nav": results}, f)
+        base = os.path.join(tmp, "base.tsv")
+        with open(base, "w") as f:
+            f.write(base_text)
+        rows, sources = make_table.build(os.path.join(tmp, "run1"), base=base)
+
+    by_key = {(r[1], r[2]): r for r in rows}
+    assert by_key[("QWEN", "tech18")][3] == "35.69", "untouched base rows are kept verbatim"
+    assert by_key[("ADAP", "tech18")][3] == "38.01"
+    new = by_key[("HARNESS+DEBATER", "sp30")]
+    m = metrics(results)
+    assert new[3] == str(round(m["total_return_pct"], 2)) and new[3] != "53.58", "rerun cell replaces base row"
+    assert int(new[10]) > 0 and new[13], "token columns filled from the sidecar"
+    assert by_key[("QWEN", "sp30")][3] == new[3] and by_key[("QWEN", "sp30")][10] == "", "ReAct dict read; no tokens"
+    assert [r[2] for r in rows] == ["tech18", "tech18", "sp30", "sp30"], "canonical universe order"
+    assert sum(1 for s, _ in sources if s == "NEW") == 2
+    print("[make_table] RUN 1 table: new cells replace base rows, others kept; ReAct + ace outputs read")
+
+
 def run_all():
     test_golden_paths_unchanged()
     test_labels_alphanumeric_and_40_asset_parse()
     test_role_classification()
     test_decision_log_and_token_sidecar()
     test_fresh_memory_guard()
+    test_make_table_merges_new_cells_into_base()
     print("CORE TESTS PASSED")
 
 

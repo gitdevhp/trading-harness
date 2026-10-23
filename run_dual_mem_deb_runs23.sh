@@ -8,16 +8,20 @@
 #SBATCH --gres=gpu:a40:1
 #SBATCH --partition=interactive-gpu
 
+# LEGACY: replicates of the ORIGINAL protocol (RiskTuner on for MEMORY/DUAL).
+# For replicates that match the refreshed RUN 1 table use instead:
+#     RUN_LABEL=run2 FULL=1 sbatch run_run1_refresh.sh   (and run3)
+#
 # Runs 2 more independent replicates (run2, run3) of:
 #   DUAL (fixed ReMo)  |  DEBATER (intra)  |  MEMORY (memory_only)
-# across all 6 universes, with temperature=0.3 to introduce real stochastic
-# variance between replicates (temperature=0.0 = greedy = identical every time).
+# across all 6 universes at temperature 0.0. Replicate-to-replicate variance
+# comes from GPU nondeterminism; --seed has no effect under greedy decoding.
 #
 # Output:
 #   {OUT_ROOT}/run2/{universe}/{dual,debater,memory}/  (replicate 2)
 #   {OUT_ROOT}/run3/{universe}/{dual,debater,memory}/  (replicate 3)
 #
-# Token usage is saved inside each *_results.json under "token_usage".
+# Token usage is saved in each run's <stem>_tokens.json sidecar.
 # A TSV summary (copy-pasteable into Google Sheets) is printed at the end.
 #
 # Resume: each step checks for existing *_results.json and skips if found.
@@ -229,105 +233,10 @@ echo "=========================================="
 echo "TSV SUMMARY  (tab-separated, paste into Sheets)"
 echo "=========================================="
 
-OUT_ROOT="$OUT_ROOT" python3 - <<'PYEOF'
-import glob, json, math, os, sys
-import numpy as np
-
-TRADING_DAYS = 252
-MODEL_LABEL = "qwen25"
-SYSTEMS = [
-    ("memory",  "HARNESS+MEMORY"),
-    ("debater", "HARNESS+DEBATER"),
-    ("dual",    "DUAL"),
-]
-UNIVERSES = ["tech18", "mag7", "balanced15", "sp30", "diversified40", "volatile25"]
-RUNS = ["run2", "run3"]
-OUT_ROOT = os.environ["OUT_ROOT"]
-
-def load_json(path):
-    with open(path) as f:
-        return json.load(f)
-
-def find_json(run, universe, subdir):
-    pattern = os.path.join(OUT_ROOT, run, universe, subdir, "*_results.json")
-    matches = glob.glob(pattern)
-    return matches[0] if matches else None
-
-def daily_returns(values):
-    return np.diff(values) / values[:-1]
-
-def cagr(values):
-    n = len(values) - 1
-    if n <= 0 or values[0] <= 0:
-        return float("nan")
-    return float((values[-1] / values[0]) ** (TRADING_DAYS / n) - 1) * 100
-
-def ann_vol(values):
-    dr = daily_returns(values)
-    return float(np.std(dr) * np.sqrt(TRADING_DAYS) * 100)
-
-def sharpe(values):
-    dr = daily_returns(values)
-    std = np.std(dr)
-    if std < 1e-12:
-        return float("nan")
-    return float(np.mean(dr) * TRADING_DAYS / (std * np.sqrt(TRADING_DAYS)))
-
-def sortino(values):
-    dr = daily_returns(values)
-    neg = dr[dr < 0]
-    downside = np.sqrt(np.mean(neg ** 2)) if len(neg) > 0 else 1e-9
-    return float(np.mean(dr) * TRADING_DAYS / (downside * np.sqrt(TRADING_DAYS) + 1e-9))
-
-def max_drawdown(values):
-    peak = np.maximum.accumulate(values)
-    return float(((values - peak) / peak).min() * 100)
-
-def calmar(values):
-    c = cagr(values)
-    mdd = abs(max_drawdown(values))
-    return float(c / (mdd + 1e-9)) if not math.isnan(c) else float("nan")
-
-def fmt(v, decimals=2):
-    if v is None or (isinstance(v, float) and math.isnan(v)):
-        return ""
-    return f"{round(v, decimals)}"
-
-header = "\t".join([
-    "Model", "System", "Universe",
-    "TotalRet%", "CAGR%", "AnnVol%", "Sharpe", "Sortino", "Calmar", "MaxDD%",
-    "LLM_Calls", "Prompt_Tokens", "Completion_Tokens", "Total_Tokens"
-])
-
-for run in RUNS:
-    print(f"\n{run.upper()}")
-    print(header)
-    for universe in UNIVERSES:
-        for subdir, label in SYSTEMS:
-            path = find_json(run, universe, subdir)
-            if path is None:
-                print(f"\t# MISSING: {run}/{universe}/{subdir}", file=sys.stderr)
-                continue
-            data = load_json(path)
-            records = data if isinstance(data, list) else data.get("daily_nav", data.get("results", []))
-            vals = np.array([r["portfolio_value"] for r in records], dtype=float)
-            total_ret = float((vals[-1] / vals[0] - 1) * 100)
-            tok = data.get("token_usage", {}) if isinstance(data, dict) else {}
-            calls = tok.get("calls", "")
-            prompt = tok.get("prompt", "")
-            compl = tok.get("completion", "")
-            total = tok.get("total", "")
-
-            row = "\t".join([
-                MODEL_LABEL, label, universe,
-                fmt(total_ret), fmt(cagr(vals)), fmt(ann_vol(vals)),
-                fmt(sharpe(vals), 2), fmt(sortino(vals), 2), fmt(calmar(vals), 2),
-                fmt(max_drawdown(vals)),
-                str(calls), str(prompt), str(compl), str(total),
-            ])
-            print(row)
-
-PYEOF
+for RUN in run2 run3; do
+    python -m ace_harness.make_table --root "${OUT_ROOT}/${RUN}" \
+        --title "$(echo "$RUN" | sed -E 's/^run/RUN /')" --out "${OUT_ROOT}/${RUN}/table.tsv"
+done
 
 echo ""
 echo "=========================================="
