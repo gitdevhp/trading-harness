@@ -345,6 +345,9 @@ class ConvictionHarness:
       - more bullish breadth multipliers (1.15, 1.07, 1.00, 0.60, 0.30 at
         70%/55%/40%/20%) vs (1.0, 0.80, 0.50, 0.25 at 60%/40%/20%)
     """
+    # apply() never mutates self, so it can be re-run on counterfactual
+    # proposals (e.g. each debate round) without changing the backtest.
+    STATELESS = True
     DEFAULT_PARAMS = {
         "target_vol": 0.22,              # vol-targeting scales exposure down toward this when max_vol is breached
         "max_vol": 0.25,                 # portfolio vol above which scaling kicks in

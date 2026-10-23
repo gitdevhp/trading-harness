@@ -14,8 +14,24 @@ CONSOLIDATOR_MODEL = os.environ.get("ACE_CONSOLIDATOR_MODEL", SOLVER_MODEL)
 
 _client = None
 
+# Every role prompt in agents.py starts with one of these, so usage can be
+# attributed per role without changing any request.
+_ROLE_PREFIXES = (
+    ("You are an autonomous ReAct Portfolio Manager", "solver"),
+    ("You are a portfolio Debater", "debater"),
+    ("You are a portfolio Reflector", "reflector"),
+    ("You are the Curator", "consolidator"),
+    ("You are a Risk Tuner", "risk_tuner"),
+)
+
+
+def _zero():
+    return {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+
+
 # Cumulative token usage across all chat() calls in this process.
-_token_counts = {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+_token_counts = _zero()
+_role_counts = {}
 
 
 def get_client():
@@ -25,31 +41,45 @@ def get_client():
     return _client
 
 
+def classify_role(messages) -> str:
+    system = messages[0].get("content", "") if messages else ""
+    for prefix, role in _ROLE_PREFIXES:
+        if system.startswith(prefix):
+            return role
+    return "other"
+
+
 def get_token_counts() -> dict:
     """Return a copy of cumulative token counts since process start (or last reset)."""
     return dict(_token_counts)
 
 
+def get_token_counts_by_role() -> dict:
+    return {role: dict(c) for role, c in _role_counts.items()}
+
+
 def reset_token_counts():
     """Reset counters to zero (call between backtests if running multiple in one process)."""
-    _token_counts.update({"prompt": 0, "completion": 0, "total": 0, "calls": 0})
+    _token_counts.update(_zero())
+    _role_counts.clear()
 
 
 def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
-    _env_temp = os.environ.get("ACE_TEMPERATURE")
-    if _env_temp is not None:
-        temperature = float(_env_temp)
     response = get_client().chat.completions.create(
         model=model, messages=messages, temperature=temperature,
         max_tokens=max_tokens, stop=stop,
     )
+    role = _role_counts.setdefault(classify_role(messages), _zero())
     # Accumulate token usage if the server reports it (vLLM always does).
     usage = getattr(response, "usage", None)
     if usage is not None:
-        _token_counts["prompt"]     += getattr(usage, "prompt_tokens", 0) or 0
-        _token_counts["completion"] += getattr(usage, "completion_tokens", 0) or 0
-        _token_counts["total"]      += getattr(usage, "total_tokens", 0) or 0
+        for key, attr in (("prompt", "prompt_tokens"), ("completion", "completion_tokens"),
+                          ("total", "total_tokens")):
+            n = getattr(usage, attr, 0) or 0
+            _token_counts[key] += n
+            role[key] += n
     _token_counts["calls"] += 1
+    role["calls"] += 1
     msg = response.choices[0].message
     # Primary: content field.
     text = (msg.content or "").strip()
