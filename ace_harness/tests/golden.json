@@ -1,0 +1,80 @@
+{
+  "prompts": {
+    "consolidator": "43b07ab700b5674ee59d03a5bae0b18fb528e82f984f873df55fe1b245d5a382",
+    "debater_no_playbook": "69beedd4ef5125575fc4449ca6fc059b47d6edace41dc74d4560fe16d54a16cb",
+    "debater_playbook": "aa08a0da8b904d7b9ff3a87648305889533f2a91d95ee810876f968746207d35",
+    "reflector_default": "ec16c2f84016b7ac1f6b1e381ecf06ab17a797a0f40680a1d436f5372ca8377d",
+    "solver_memory_feedback": "6f4b2dd70247f01e1c016505e46a0f015386edbc2186d57cf26cfed1395d40dc",
+    "solver_plain": "678efaca007e47d9351bfc955bca82e2e52291c9c9bf74a8a6ced0b11a13346e"
+  },
+  "recorded_at_commit": "63ec7693ed2d991f27a394c31137e45a6b77df2c",
+  "systems": {
+    "baseline": {
+      "alloc_hash": "0618a53407ea61d774ba6432f7f0a9cba33646166ea36a002db4c4edc0f36e22",
+      "calls_hash": "437979f8803d299080cae27101127a7cc0b08d24a856c5cddfa50ba0efc9d615",
+      "final_nav": 963911.59,
+      "n_calls": 22,
+      "role_counts": {
+        "solver": 22
+      }
+    },
+    "dual": {
+      "alloc_hash": "7263087c4291be8240827db93f40154e58c232c0c4abab3269a84983e39a13b8",
+      "calls_hash": "03ff1afe9cfe21cfa8e6438bde86d5e0945009ed86ab7d4871f791553c8fca9e",
+      "final_nav": 944001.01,
+      "n_calls": 88,
+      "role_counts": {
+        "consolidator": 21,
+        "debater": 19,
+        "reflector": 10,
+        "solver": 38
+      }
+    },
+    "dual+rt": {
+      "alloc_hash": "7263087c4291be8240827db93f40154e58c232c0c4abab3269a84983e39a13b8",
+      "calls_hash": "2c4dd0bcd85e51a656e79c3b019caf574a18367699c3b2e1daeffe84affb64a8",
+      "final_nav": 944001.01,
+      "n_calls": 98,
+      "role_counts": {
+        "consolidator": 21,
+        "debater": 19,
+        "reflector": 10,
+        "risk_tuner": 10,
+        "solver": 38
+      }
+    },
+    "intra": {
+      "alloc_hash": "36fbbf6a42549eaef2c4c0fcf522ca7c4eef3b5d5369ecd27514f30c4b962512",
+      "calls_hash": "e6cb26d17c125578a87c826b760c1a0ec5d6c26b257d5d8589f05a399408b8eb",
+      "final_nav": 907952.25,
+      "n_calls": 75,
+      "role_counts": {
+        "debater": 25,
+        "solver": 50
+      }
+    },
+    "memory_only": {
+      "alloc_hash": "1cac8995cb5cfcee558bdf265e0f4c3ef902ed49287ba62349d0e0694f32d0f5",
+      "calls_hash": "9836b3a2fa96ad7971e43529b6f7e75f8fc8b1a5baaeda015eea0cc9a9728e3f",
+      "final_nav": 952775.17,
+      "n_calls": 42,
+      "role_counts": {
+        "consolidator": 10,
+        "reflector": 10,
+        "solver": 22
+      }
+    },
+    "memory_only+rt": {
+      "alloc_hash": "1cac8995cb5cfcee558bdf265e0f4c3ef902ed49287ba62349d0e0694f32d0f5",
+      "calls_hash": "c4b751751fa0cabb3cf92c87ea8ab0c74ca8d58bc62f52e42457125f5d3abf75",
+      "final_nav": 952775.17,
+      "n_calls": 52,
+      "role_counts": {
+        "consolidator": 10,
+        "reflector": 10,
+        "risk_tuner": 10,
+        "solver": 22
+      }
+    }
+  }
+}
