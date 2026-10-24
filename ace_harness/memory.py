@@ -146,23 +146,31 @@ class ExperienceMemory:
         track_saturation: pass False from slow/inter-task loops so their
         consolidation calls don't count toward SATURATED(M). The saturation
         signal should only reflect fast-loop (admitted AND g_sto) consolidations.
+
+        Returns {"added_ids": [ids added that survived prune], "replaced": n,
+        "removed": n, "updated": n}; existing callers ignore it.
         """
+        added, counts = [], {"replaced": 0, "removed": 0, "updated": 0}
         for op in (ops or [])[:MAX_OPS_PER_CALL]:
             kind = op.get("op") if isinstance(op, dict) else None
             if kind == "add":
                 content = (op.get("content") or "").strip()
                 if content:
-                    self.add_bullet(op.get("section", "STRATEGIES & INSIGHTS"), content)
+                    added.append(self.add_bullet(op.get("section", "STRATEGIES & INSIGHTS"), content))
             elif kind == "update":
                 self.update_counts(op.get("id", ""), int(op.get("helpful", 0) or 0), int(op.get("harmful", 0) or 0))
+                counts["updated"] += 1
             elif kind == "replace":
                 self.replace_bullet(op.get("id", ""), op.get("content", ""))
+                counts["replaced"] += 1
             elif kind == "remove":
-                self.bullets.pop(op.get("id", ""), None)
+                if self.bullets.pop(op.get("id", ""), None) is not None:
+                    counts["removed"] += 1
         self.prune()
         if track_saturation:
             # Record bullet count after this consolidation for SATURATED tracking.
             self._consolidation_sizes.append(len(self.bullets))
+        return {"added_ids": [bid for bid in added if bid in self.bullets], **counts}
 
     def _sorted_entries(self, section):
         entries = [(bid, b) for bid, b in self.bullets.items() if b["section"] == section]
@@ -188,6 +196,30 @@ class ExperienceMemory:
             for bid, b in visible[:max_bullets_per_section]:
                 lines.append(f"[{bid}] helpful={b['helpful']} harmful={b['harmful']} :: {b['content']}")
         return "\n".join(lines) if lines else "(Experience memory is empty — no prior lessons yet.)"
+
+    def format_bullets(self, ids, counts=None, max_bullets_per_section: int = 10):
+        """The given bullets in format_for_prompt's exact line format, grouped
+        by section, or None if none exist. counts: optional {id: (helpful,
+        harmful)} to display (and rank by) instead of the bullet's own counts."""
+        wanted = [bid for bid in ids if bid in self.bullets]
+        if not wanted:
+            return None
+
+        def shown(bid):
+            b = self.bullets[bid]
+            return counts[bid] if counts and bid in counts else (b["helpful"], b["harmful"])
+
+        lines = []
+        for section in self.sections:
+            entries = [bid for bid in wanted if self.bullets[bid]["section"] == section]
+            if not entries:
+                continue
+            entries.sort(key=lambda bid: (shown(bid)[0] - shown(bid)[1], sum(shown(bid))), reverse=True)
+            lines.append(f"## {section}")
+            for bid in entries[:max_bullets_per_section]:
+                helpful, harmful = shown(bid)
+                lines.append(f"[{bid}] helpful={helpful} harmful={harmful} :: {self.bullets[bid]['content']}")
+        return "\n".join(lines)
 
     def format_all_for_review(self) -> str:
         """Unfiltered view, for the Consolidator only — it needs to see

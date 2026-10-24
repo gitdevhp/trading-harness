@@ -51,6 +51,8 @@ def _normalize_lessons(raw):
     of {"lesson": str, "confidence": "high"|"medium"|"low"}, capped, so a
     malformed or overlong response can't flood the Consolidator."""
     out = []
+    if isinstance(raw, (dict, int, float)):  # used to crash on slicing; any other shape behaves as before
+        raw = []
     for item in (raw or [])[:_MAX_LESSONS_PER_CALL]:
         if isinstance(item, dict):
             text = str(item.get("lesson", "")).strip()
@@ -68,15 +70,45 @@ def _normalize_lessons(raw):
 
 _MAX_BULLET_CHECKS_PER_CALL = 5
 _VALID_VERDICTS = {"confirmed", "contradicted"}
+_CANDIDATE_VERDICTS = {"confirmed", "contradicted", "unverifiable"}
 
 
-def _normalize_bullet_checks(raw):
+def _as_bool(value, default):
+    """JSON booleans as the model actually emits them: true/false, "true"/
+    "false", "yes"/"no", 1/0. bool("false") is True, so plain bool() is wrong."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("true", "yes", "1"):
+            return True
+        if v in ("false", "no", "0"):
+            return False
+    return default
+
+
+def _normalize_candidate_checks(raw, n_candidates):
+    out = []
+    for item in (raw if isinstance(raw, list) else [])[:n_candidates]:
+        if not isinstance(item, dict):
+            continue
+        cid = str(item.get("id", "")).strip().upper()
+        verdict = str(item.get("verdict", "")).strip().lower()
+        if verdict in _CANDIDATE_VERDICTS and cid.startswith("C") and cid[1:].isdigit() \
+                and int(cid[1:]) < n_candidates:
+            out.append({"id": f"C{int(cid[1:])}", "verdict": verdict, "reason": str(item.get("reason", "")).strip()})
+    return out
+
+
+def _normalize_bullet_checks(raw, cap=_MAX_BULLET_CHECKS_PER_CALL):
     """Coerce "bullet_checks" into a clean list of {"id": str, "verdict":
     "confirmed"|"contradicted", "reason": str}, capped. This is the direct,
     evidence-grounded path to a bullet's helpful/harmful count — separate
     from (and a check on) the Consolidator's text-similarity-based updates."""
     out = []
-    for item in (raw or [])[:_MAX_BULLET_CHECKS_PER_CALL]:
+    for item in (raw if isinstance(raw, list) else [])[:cap]:
         if not isinstance(item, dict):
             continue
         bid = str(item.get("id", "")).strip()
@@ -384,7 +416,15 @@ Proposed target allocations: {proposed_allocations}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                       temperature=0.0, max_tokens=600)
-        parsed = _extract_json(reply) or {}
+        parsed = _extract_json(reply)
+        raw_verdict = str(parsed.get("verdict", "")).strip().lower() if isinstance(parsed, dict) else ""
+        parse_ok = raw_verdict in ("accept", "revise")
+        parsed = parsed if isinstance(parsed, dict) else {}
+        # verdict_norm is exactly how every legacy loop reads "verdict" (only the
+        # literal "accept", or a missing verdict, stops refinement), so ADAP-v2
+        # stops on the same replies DEBATER/DUAL stop on. parse_ok separates a
+        # well-formed reply from that missing-verdict default.
+        verdict_norm = "accept" if parsed.get("verdict", "accept") == "accept" else "revise"
         direction = parsed.get("direction", "well_calibrated")
         if direction not in ("increase_conviction", "decrease_risk", "well_calibrated"):
             direction = "well_calibrated"
@@ -403,10 +443,23 @@ Proposed target allocations: {proposed_allocations}"""
             "lessons": _normalize_lessons(parsed.get("lessons")),
             "should_store": should_store,
             "should_refine": should_refine,
+            "parse_ok": parse_ok,
+            "verdict_norm": verdict_norm,
+            # ADAP-v2 governance signals: same fields, but "false"/"no"/null parsed
+            # correctly (bool("false") is True). Legacy readers keep the fields above.
+            "store_signal": _as_bool(parsed.get("should_store", False), False),
+            "refine_signal": _as_bool(parsed.get("should_refine", True), True),
         }
 
     def post_task_reflect(self, decision_date, next_date, executed_allocations,
-                           decision_prices, realized_prices, playbook_text=None, decision_screener_text=None):
+                           decision_prices, realized_prices, playbook_text=None, decision_screener_text=None,
+                           candidate_lessons=None, probation_text=None, bullet_check_cap=None):
+        """candidate_lessons / probation_text / bullet_check_cap are used only by
+        ADAP-v2; with their defaults the prompt is byte-identical to before.
+          candidate_lessons: lessons the critic nominated on decision_date, before
+            the outcome was known; graded here against realized returns.
+          probation_text: stored bullets not yet shown to the Solver, so they can
+            earn realized evidence before they influence a decision."""
         realized_return_pct = {}
         for asset, entry_price in decision_prices.items():
             exit_price = realized_prices.get(asset)
@@ -419,9 +472,20 @@ Proposed target allocations: {proposed_allocations}"""
             f"the Solver had available when it made this call:\n{decision_screener_text}\n"
             if decision_screener_text else ""
         )
+        probation_block = (
+            "\n\nPROBATIONARY bullets (stored but NOT shown to the Solver for this decision). Grade them in "
+            "bullet_checks against this period's realized data exactly as you would grade shown bullets; "
+            f"you may cite these ids:\n{probation_text}\n" if probation_text else ""
+        )
+        candidates = list(candidate_lessons or [])
+        candidate_block = (
+            f"\n\nCANDIDATE lessons proposed on {decision_date}, BEFORE these outcomes were known:\n"
+            + "\n".join(f"C{i}: {c['lesson']}" for i, c in enumerate(candidates)) + "\n"
+            if candidates else ""
+        )
         system_prompt = f"""You are a portfolio Reflector analyzing what happened after a decision was executed.
 Compare the allocation made on {decision_date} to realized per-asset returns through {next_date}. Extract at most {_MAX_LESSONS_PER_CALL} concrete, REUSABLE, GENERAL lessons (about regime signals, sizing, timing, diversification, or turnover/fee cost) — not just a restatement of "asset X went up".
-{memory_block}{screener_block}
+{memory_block}{screener_block}{probation_block}{candidate_block}
 {_LESSON_QUALITY_BAR}
 A lesson here should connect a SPECIFIC value from the decision-date screener to the realized outcome — e.g. "when 6M-Mom was below -10% at decision time, the asset kept underperforming over the next month" is usable; "the market was volatile so returns were mixed" is not.
 
@@ -435,16 +499,28 @@ Separately from new lessons, GRADE the EXISTING bullets you were shown (the ones
 
 Respond ONLY with JSON, no other text:
 {{"lessons": [{{"lesson": "short reusable rule with a specific condition", "confidence": "high|medium|low"}}], "bullet_checks": [{{"id": "<exact existing bullet id>", "verdict": "confirmed" or "contradicted", "reason": "1 short sentence citing the realized number"}}]}}"""
+        if candidates:
+            system_prompt += (
+                '\n\nAlso include "candidate_checks" in the same JSON object, one entry per CANDIDATE lesson: '
+                '[{"id": "C0", "verdict": "confirmed" or "contradicted" or "unverifiable", '
+                '"reason": "1 short sentence citing the realized number"}]. Use "confirmed" ONLY when the realized '
+                "per-asset returns directly support the lesson's specific condition and consequence.")
         user_prompt = f"""Executed allocations on {decision_date}: {executed_allocations}
 Realized per-asset returns to {next_date} (%): {realized_return_pct}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=550)
-        parsed = _extract_json(reply) or {}
+                      temperature=0.0, max_tokens=800 if (candidates or probation_text) else 550)
+        parsed = _extract_json(reply)
+        parse_ok = isinstance(parsed, dict)
+        parsed = parsed if parse_ok else {}
         return {
             "lessons": _normalize_lessons(parsed.get("lessons")),
-            "bullet_checks": _normalize_bullet_checks(parsed.get("bullet_checks")),
+            "bullet_checks": _normalize_bullet_checks(parsed.get("bullet_checks"),
+                                                      cap=_MAX_BULLET_CHECKS_PER_CALL if bullet_check_cap is None
+                                                      else bullet_check_cap),
+            "candidate_checks": _normalize_candidate_checks(parsed.get("candidate_checks"), len(candidates)),
             "realized_return_pct": realized_return_pct,
+            "parse_ok": parse_ok,
         }
 
 

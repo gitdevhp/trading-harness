@@ -11,6 +11,18 @@ import yfinance as yf
 from openai import OpenAI
 
 
+def _anon_label(i):
+    """Bijective base-26 label: 0..25 -> A..Z, 26 -> AA, 27 -> AB, ...
+    (chr(65 + i) yields punctuation such as '[' and ']' past 26 assets,
+    which the allocation parser cannot read)."""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
 # ============================================================
 # YFINANCE CONFIG
 # ============================================================
@@ -75,7 +87,7 @@ def setup_universe(tickers):
         raise ValueError("Duplicate tickers are not allowed.")
 
     ANONYMOUS_MAP = {
-        ticker: f"ASSET_{chr(65 + i)}"
+        ticker: f"ASSET_{_anon_label(i)}"
         for i, ticker in enumerate(RAW_UNIVERSE)
     }
 

@@ -45,6 +45,7 @@ def _fake_chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
             'Action: Target_Allocations[{"ASSET_A": 15, "ASSET_B": 15, "ASSET_C": 10, "CASH": 60}]')
 
 
+llm_client._unpatched_chat = llm_client.chat  # tests that exercise token accounting need the real one
 llm_client.chat = _fake_chat
 
 from ace_harness.market import MarketUniverse
@@ -643,4 +644,7 @@ if __name__ == "__main__":
     run_one("dual_permanent", use_risk_harness=True, risk_harness_cls=SimpleTrailingRiskHarness,
             include_screener_tool=False)
     run_monthly_one()
+    from ace_harness.tests import test_core, test_v2
+    test_core.run_all()
+    test_v2.run_all()
     print("SMOKE TEST PASSED")

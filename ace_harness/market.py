@@ -12,6 +12,7 @@ every system, not just the new engine) versus the original version:
     richer build_market_snapshot().
 """
 import os
+import re
 import time
 import numpy as np
 import pandas as pd
@@ -90,10 +91,29 @@ def _download_ticker(ticker: str, start_date: str, end_date: str, attempts: int 
     raise ValueError(f"{ticker}: unable to obtain usable market data after all attempts. Last error: {last_error}")
 
 
+def anon_label(i: int) -> str:
+    """Bijective base-26: 0..25 -> A..Z, 26 -> AA, 27 -> AB, ... The first 26
+    labels are identical to the old chr(65 + i) scheme; past 26 that scheme
+    produced 'ASSET_[', 'ASSET_]', ... which the Solver's allocation parser
+    cannot read and whose ']' truncates the whole Target_Allocations action."""
+    s = ""
+    i += 1
+    while i:
+        i, r = divmod(i - 1, 26)
+        s = chr(65 + r) + s
+    return s
+
+
+_LABEL_RE = re.compile(r"^ASSET_[A-Z]+$")
+
+
 class MarketUniverse:
     def __init__(self, tickers):
         self.raw_universe = [t.upper() for t in tickers]
-        self.anon_map = {t: f"ASSET_{chr(65 + i)}" for i, t in enumerate(self.raw_universe)}
+        self.anon_map = {t: f"ASSET_{anon_label(i)}" for i, t in enumerate(self.raw_universe)}
+        if len(set(self.anon_map.values())) != len(self.anon_map) or not all(
+                _LABEL_RE.match(v) for v in self.anon_map.values()):
+            raise ValueError("Anonymized asset labels must be unique and alphabetic.")
         self.reverse_map = {v: k for k, v in self.anon_map.items()}
         self.anon_universe = list(self.anon_map.values())
         self.data_cache = {}
