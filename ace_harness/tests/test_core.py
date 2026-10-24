@@ -226,6 +226,27 @@ def test_make_table_base_blocks_and_expect():
 
 
 
+def test_summarize_runs():
+    from ace_harness import make_table, summarize_runs
+    header = "\t".join(make_table.HEADER)
+    with tempfile.TemporaryDirectory() as tmp:
+        paths = []
+        for k, (a, b) in enumerate([(10, 20), (12, 22), (14, 30)]):
+            path = os.path.join(tmp, f"run{k + 1}.tsv")
+            with open(path, "w") as f:
+                f.write(f"RUN {k + 1}\n{header}\n"
+                        f"qwen25\tADAP\ttech18\t{a}\t1\t1\t1\t1\t1\t-1\t100\t\t\t1000\n"
+                        f"qwen25\tADAP\tmag7\t{b}\t1\t1\t1\t1\t1\t-1\t200\t\t\t3000\n")
+            paths.append(path)
+        per_universe, cross = summarize_runs.summarize([summarize_runs.read_table(p) for p in paths])
+    col = cross[0].index("TotalRet% mean")
+    assert cross[1][0] == "ADAP" and cross[1][col] == "18.0"            # mean of 15, 17, 22
+    assert cross[1][cross[0].index("TotalRet% sd")] == str(round(3.605551275, 2))
+    assert per_universe[1][per_universe[0].index("TotalRet% mean")] == "12.0"
+    assert cross[1][cross[0].index("LLM_Calls mean")] == "150.0"
+    print("[summarize_runs] per-universe and cross-universe mean/sd across runs computed correctly")
+
+
 def run_all():
     test_golden_paths_unchanged()
     test_labels_alphanumeric_and_40_asset_parse()
@@ -234,6 +255,7 @@ def run_all():
     test_fresh_memory_guard()
     test_make_table_merges_new_cells_into_base()
     test_make_table_base_blocks_and_expect()
+    test_summarize_runs()
     print("CORE TESTS PASSED")
 
 

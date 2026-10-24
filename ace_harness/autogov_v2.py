@@ -150,6 +150,8 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
                     lessons = all_lessons
                 elif cfg.storage_mode == "immediate_admitted":  # ReMo Algorithm 1
                     lessons = all_lessons if admitted else None
+                elif cfg.storage_mode == "admitted_gsto":       # AutoGovern Algorithm 2
+                    lessons = all_lessons if (admitted and reviewed[-1]["store_signal"]) else None
                 else:                                           # immediate_gsto
                     lessons = stage_lessons(reviewed, cfg, admitted)
                 if lessons is not None:

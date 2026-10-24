@@ -32,7 +32,7 @@ UNIVERSES = ["tech18", "mag7", "balanced15", "sp30", "diversified40", "volatile2
 SYSTEMS = [
     ("qwen", "QWEN"), ("react", "REACT"), ("harness", "HARNESS"),
     ("memory", "HARNESS+MEMORY"), ("debater", "HARNESS+DEBATER"), ("dual", "DUAL"), ("adap", "ADAP"),
-    ("remo", "REMO"), ("debater_stop", "DEBATER+STOP"),
+    ("remo", "REMO"), ("autogov", "AUTOGOV"), ("debater_stop", "DEBATER+STOP"),
 ]
 HEADER = ["Model", "System", "Universe", "TotalRet%", "CAGR%", "AnnVol%", "Sharpe", "Sortino", "Calmar",
           "MaxDD%", "LLM_Calls", "Prompt_Tokens", "Completion_Tokens", "Total_Tokens"]

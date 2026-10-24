@@ -398,6 +398,28 @@ def test_ablation_tags_and_reserved_overrides():
     print("[run_monthly] --gov cannot override flags that also drive the tag and manifest")
 
 
+def test_autogov_preset_is_algorithm_2():
+    """Faithful AutoGovern: every attempt reviewed, consolidate iff admitted AND
+    g_sto, all memory shown (no outcome grounding)."""
+    lesson = {"lesson": "When 6M-Mom > 20% size up to 12%", "confidence": "low"}
+    script = iter([{"verdict": "revise", "feedback": "f", "lessons": [lesson], "should_store": True},
+                   {"verdict": "revise", "feedback": "f", "lessons": [], "should_store": True},
+                   {"verdict": "revise", "feedback": "f", "lessons": [], "should_store": True},   # task 1: exhausted
+                   {"verdict": "accept", "lessons": [lesson], "should_store": False},              # task 2: no g_sto
+                   {"verdict": "accept", "lessons": [lesson], "should_store": True}]               # task 3: stored
+                  + [{"verdict": "accept", "lessons": [], "should_store": False}] * 10)
+    chat = ScriptedChat([], debater_fn=lambda n, sys_: next(script),
+                        consolidator_fn=lambda user: [{"op": "add", "section": "RISK LESSONS", "content": "stored"}]
+                        if "6M-Mom > 20%" in user.split("lessons:")[-1] else [])
+    metas, memory = _run_months(chat, preset="autogov", months=3)
+    curator_calls = [sum(1 for r, _, _ in calls if r == "consolidator") for _, calls in metas]
+    assert metas[0][0]["governance"]["n_reviews"] == 3, "every attempt is reviewed (no terminal skip)"
+    assert curator_calls == [0, 0, 1], f"consolidate iff admitted AND g_sto: {curator_calls}"
+    solver_sys = [s for r, s, _ in metas[2][1] if r == "solver"]
+    assert all("EXPERIENCE MEMORY" in s for s in solver_sys), "all memory is shown, as in DUAL"
+    print("[v2] autogov preset = the peer's Algorithm 2 (admitted AND g_sto storage, full exposure, freeze+probes)")
+
+
 def test_run_monthly_end_to_end():
     """run_monthly wiring for adap_v2 and intra: results stay a list, sidecars
     and manifest are written, governance is logged, tokens are per role."""
@@ -470,6 +492,7 @@ def run_all():
     test_single_round_never_freezes()
     test_malformed_reflector_fields()
     test_ablation_tags_and_reserved_overrides()
+    test_autogov_preset_is_algorithm_2()
     test_deferred_outcome_verified_storage()
     test_evidence_gated_exposure()
     test_freeze_controller_unit()

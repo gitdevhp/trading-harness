@@ -17,7 +17,8 @@ Systems (paper name -> --systems value):
   HARNESS+MEMORY   memory_only
   DUAL             dual            (fixed ReMo as originally run)
   REMO             remo            (faithful ReMo Algorithm 1: store only admitted tasks)
-  ADAP             adap_v2         (AutoGovern, outcome-grounded; see governance.py)
+  AUTOGOV          autogov         (faithful AutoGovern Algorithm 2, the peer's method)
+  ADAP             adap_v2         (AutoGovern + outcome grounding; see governance.py)
   DEBATER+STOP     debater_stop    (ADAP's stops without memory)
 
 Every run writes <stem>_tokens.json, <stem>_manifest.json and
@@ -53,8 +54,8 @@ DEFAULT_UNIVERSE = [
     "AMAT", "MU", "AMZN", "TSLA", "PEP", "COST", "HON", "GOOGL", "META", "NFLX",
 ]
 
-_MEMORY_SYSTEMS = ("inter", "dual", "memory_only", "dual_permanent", "adap_v2", "remo")
-_V2_PRESETS = {"adap_v2": "v2", "debater_stop": "debater_stop", "remo": "remo"}
+_MEMORY_SYSTEMS = ("inter", "dual", "memory_only", "dual_permanent", "adap_v2", "remo", "autogov")
+_V2_PRESETS = {"adap_v2": "v2", "debater_stop": "debater_stop", "remo": "remo", "autogov": "autogov"}
 _ROUND_SYSTEMS = ("intra", "dual", "dual_session", *_V2_PRESETS)
 # set through their own flags so tag, manifest and every system stay consistent
 _RESERVED_GOV_KEYS = {"use_risk_tuner": "--no_adaptive_risk", "debater_sizing_context": "--debater_sizing_context",

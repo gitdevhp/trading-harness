@@ -34,7 +34,10 @@
 #   REUSE_DEBATER=1     do not re-run DEBATER in the 4 small universes — only if job
 #                       1706716 ran on a checkout that already contained b2c9a69.
 #   FULL=1              re-run all 42 cells from this commit (maximum consistency).
-#   EXTRAS=1            also run REMO (faithful ReMo Alg. 1) and DEBATER+STOP rows.
+#   EXTRAS=1            also run the rows that tie the extension to the peer's paper:
+#                       REMO (faithful ReMo Alg. 1), AUTOGOV (faithful AutoGovern Alg. 2;
+#                       ADAP = AUTOGOV + outcome grounding) and DEBATER+STOP (ADAP's stops
+#                       without memory).
 #   RUN_LABEL=run1      output subdirectory; use run2 / run3 for replicates (FULL=1).
 #   BASE_TSV=path       your current RUN 1 table (TSV, same columns): the printed
 #                       table merges the new cells into it.
@@ -124,7 +127,7 @@ else
     done
 fi
 if [[ "$EXTRAS" == "1" ]]; then
-    for u in "${ALL_UNIVERSES[@]}"; do add "$u" remo; add "$u" debater_stop; done
+    for u in "${ALL_UNIVERSES[@]}"; do add "$u" remo; add "$u" autogov; add "$u" debater_stop; done
 fi
 
 get_tickers() { python -m ace_harness.universes "$1"; }
@@ -145,7 +148,7 @@ if len(files) > 1:
     print(f"ERROR: {cell} holds {len(files)} results files; remove the stale one", file=sys.stderr)
     sys.exit(2)
 manifest = json.load(open(sidecar_paths(files[0])["manifest"]))
-want_rt = os.environ["RISK_TUNER"] == "on" and system in ("memory", "dual", "adap", "remo")
+want_rt = os.environ["RISK_TUNER"] == "on" and system in ("memory", "dual", "adap", "remo", "autogov")
 if manifest.get("status") == "complete" and manifest.get("risk_tuner") != want_rt:
     print(f"ERROR: {cell} was run with risk_tuner={manifest.get('risk_tuner')}; use a new OUT_ROOT", file=sys.stderr)
     sys.exit(2)
@@ -188,6 +191,7 @@ run_cell() {
         dual)    "${ace[@]}" --systems dual $RT_FLAG ;;
         adap)    "${ace[@]}" --systems adap_v2 $RT_FLAG ;;
         remo)    "${ace[@]}" --systems remo $RT_FLAG ;;
+        autogov) "${ace[@]}" --systems autogov $RT_FLAG ;;
         debater_stop) "${ace[@]}" --systems debater_stop ;;
     esac
 }

@@ -41,7 +41,7 @@ _CONF_RANK = {"low": 0, "medium": 1, "high": 2}
 _CHOICES = {
     "submit_policy": ("last", "r1_unless_admitted"),
     "memory": ("on", "off"),
-    "storage_mode": ("deferred_verified", "immediate_gsto", "immediate_admitted", "immediate_all"),
+    "storage_mode": ("deferred_verified", "admitted_gsto", "immediate_gsto", "immediate_admitted", "immediate_all"),
     "stage_min_confidence": tuple(_CONF_RANK),
     "exposure_mode": ("evidence_gated", "all"),
     "freeze_mode": ("window_probe", "off"),
@@ -91,6 +91,11 @@ PRESETS = {
     "dual_equiv": dict(storage_mode="immediate_all", exposure_mode="all", freeze_mode="off", **_OFF_CONTROL),
     # faithful ReMo Algorithm 1: consolidate a task's lessons only if admitted
     "remo": dict(storage_mode="immediate_admitted", exposure_mode="all", freeze_mode="off", **_OFF_CONTROL),
+    # faithful AutoGovern (the peer's Algorithm 2): critic g_ref stop; consolidate
+    # iff admitted AND g_sto AND not frozen; sliding-window freeze with probes;
+    # every attempt reviewed; all memory shown. 'v2' = this + outcome grounding.
+    "autogov": dict(storage_mode="admitted_gsto", exposure_mode="all", skip_terminal_review=False,
+                    convergence_eps_pp=0.0),
 }
 
 
