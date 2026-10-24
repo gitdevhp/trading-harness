@@ -39,6 +39,8 @@
 #                       ADAP = AUTOGOV + outcome grounding) and DEBATER+STOP (ADAP's stops
 #                       without memory).
 #   RUN_LABEL=run1      output subdirectory; use run2 / run3 for replicates (FULL=1).
+#   ONLY="u:s u:s"      run exactly these cells instead (e.g. ONLY="mag7:adap sp30:qwen"
+#                       END_DATE=2024-03-31 for a quick GPU smoke test).
 #   BASE_TSV=path       your current RUN 1 table (TSV, same columns): the printed
 #                       table merges the new cells into it.
 #   OUT_ROOT=dir        default ${ROOT_DIR}/run1_refresh_<jobid>; re-submit with the same
@@ -128,6 +130,13 @@ else
 fi
 if [[ "$EXTRAS" == "1" ]]; then
     for u in "${ALL_UNIVERSES[@]}"; do add "$u" remo; add "$u" autogov; add "$u" debater_stop; done
+fi
+if [[ -n "${ONLY:-}" ]]; then
+    read -ra CELLS <<< "$ONLY"
+    for c in "${CELLS[@]}"; do
+        [[ "$c" =~ ^(tech18|mag7|balanced15|sp30|diversified40|volatile25):(qwen|react|harness|memory|debater|dual|adap|remo|autogov|debater_stop)$ ]] \
+            || { echo "ONLY: bad cell '$c' (want universe:system)" >&2; exit 1; }
+    done
 fi
 
 get_tickers() { python -m ace_harness.universes "$1"; }
