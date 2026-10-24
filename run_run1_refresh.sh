@@ -29,6 +29,8 @@
 #   RISK_TUNER=off|on   off (default): MEMORY/DUAL/ADAP all run WITHOUT the RiskTuner.
 #                       on: memory systems keep the RiskTuner (then disclose it in the
 #                       paper); MEMORY/DUAL in the 4 small universes are not re-run.
+#                       Note: ADAP-v2's memory freeze also pauses its RiskTuner updates.
+#                       A RUN_DIR started with one setting refuses to resume with the other.
 #   REUSE_DEBATER=1     do not re-run DEBATER in the 4 small universes — only if job
 #                       1706716 ran on a checkout that already contained b2c9a69.
 #   FULL=1              re-run all 42 cells from this commit (maximum consistency).
@@ -74,19 +76,34 @@ EXTRAS="${EXTRAS:-0}"
 RUN_LABEL="${RUN_LABEL:-run1}"
 JOB_ID="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
 OUT_ROOT="${OUT_ROOT:-${ROOT_DIR}/run1_refresh_${JOB_ID}}"
+mkdir -p "$OUT_ROOT"
+OUT_ROOT="$(cd "$OUT_ROOT" && pwd)"          # absolute: ReAct scripts run from REACT_DIR
 RUN_DIR="${OUT_ROOT}/${RUN_LABEL}"
 mkdir -p "$RUN_DIR"
+if [[ -n "${BASE_TSV:-}" ]]; then
+    [[ -f "$BASE_TSV" ]] || { echo "BASE_TSV not found: $BASE_TSV" >&2; exit 1; }
+    BASE_TSV="$(cd "$(dirname "$BASE_TSV")" && pwd)/$(basename "$BASE_TSV")"
+fi
 
 case "$RISK_TUNER" in
     off) RT_FLAG="--no_adaptive_risk" ;;
     on)  RT_FLAG="" ;;
     *)   echo "RISK_TUNER must be off or on" >&2; exit 1 ;;
 esac
+if [[ -f "${RUN_DIR}/RISK_TUNER" && "$(cat "${RUN_DIR}/RISK_TUNER")" != "$RISK_TUNER" ]]; then
+    echo "ERROR: ${RUN_DIR} was started with RISK_TUNER=$(cat "${RUN_DIR}/RISK_TUNER"); resume with the same" \
+         "setting or use a new OUT_ROOT/RUN_LABEL" >&2
+    exit 1
+fi
+echo "$RISK_TUNER" > "${RUN_DIR}/RISK_TUNER"
+export RISK_TUNER
 
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
     echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true"
 fi
-echo "commit $(git rev-parse HEAD)" | tee "${RUN_DIR}/COMMIT"
+COMMIT="$(git rev-parse HEAD)"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) job=${JOB_ID} commit=${COMMIT} risk_tuner=${RISK_TUNER}" \
+    | tee -a "${RUN_DIR}/COMMIT"
 
 SMALL=(tech18 mag7 balanced15 volatile25)
 LARGE=(sp30 diversified40)
@@ -112,16 +129,27 @@ fi
 
 get_tickers() { python -m ace_harness.universes "$1"; }
 
-cell_done() {  # a cell is done when its results exist (and, for ace systems, its manifest is complete)
+cell_done() {  # 0 = done, 1 = (re)run it, 2 = inconsistent cell: abort
+              # done = results exist; ace cells also need a complete manifest with the requested RiskTuner
     local dir="$1" sys="$2"
     case "$sys" in
-        qwen|react|harness) compgen -G "${dir}/*.json" >/dev/null 2>&1 ;;
-        *) python - "$dir" <<'PYEOF'
-import glob, json, sys
+        qwen|react|harness) [[ -f "${dir}/PROVENANCE" ]] && compgen -G "${dir}/*_results_raw.json" >/dev/null 2>&1 ;;
+        *) python - "$dir" "$sys" <<'PYEOF'
+import glob, json, os, sys
 from ace_harness.accounting import sidecar_paths
-files = glob.glob(sys.argv[1] + "/*_results.json")
-ok = len(files) == 1 and json.load(open(sidecar_paths(files[0])["manifest"])).get("status") == "complete"
-sys.exit(0 if ok else 1)
+cell, system = sys.argv[1], sys.argv[2]
+files = glob.glob(cell + "/*_results.json")
+if not files:
+    sys.exit(1)
+if len(files) > 1:
+    print(f"ERROR: {cell} holds {len(files)} results files; remove the stale one", file=sys.stderr)
+    sys.exit(2)
+manifest = json.load(open(sidecar_paths(files[0])["manifest"]))
+want_rt = os.environ["RISK_TUNER"] == "on" and system in ("memory", "dual", "adap", "remo")
+if manifest.get("status") == "complete" and manifest.get("risk_tuner") != want_rt:
+    print(f"ERROR: {cell} was run with risk_tuner={manifest.get('risk_tuner')}; use a new OUT_ROOT", file=sys.stderr)
+    sys.exit(2)
+sys.exit(0 if manifest.get("status") == "complete" else 1)
 PYEOF
         ;;
     esac
@@ -131,7 +159,10 @@ run_cell() {
     local uni="$1" sys="$2"
     local dir="${RUN_DIR}/${uni}/${sys}"
     read -ra TICKERS <<< "$(get_tickers "$uni")"
-    if cell_done "$dir" "$sys" 2>/dev/null; then echo "  [skip] ${uni}/${sys}"; return; fi
+    local rc=0
+    cell_done "$dir" "$sys" || rc=$?
+    if (( rc == 0 )); then echo "  [skip] ${uni}/${sys}"; return; fi
+    if (( rc == 2 )); then exit 1; fi
     mkdir -p "$dir"
     echo "  [run]  ${uni}/${sys}  (${#TICKERS[@]} tickers)"
     local common=(--tickers "${TICKERS[@]}" --start "$START_DATE" --end "$END_DATE")
@@ -140,10 +171,18 @@ run_cell() {
                --fallback_mode equal_weight --max_tokens "$MAX_TOKENS")
     local react=("${common[@]}" --initial-capital "$INITIAL_CAPITAL" --rebalance-days "$REBALANCE_DAYS"
                  --warmup-days 0 --output "${dir}/${sys}_results_raw.json")
+    local react_script=""
     case "$sys" in
-        qwen)    (cd "$REACT_DIR" && python qwen_port.py "${react[@]}") ;;
-        react)   (cd "$REACT_DIR" && python noharness.py "${react[@]}") ;;
-        harness) (cd "$REACT_DIR" && python yesharnessgpt.py "${react[@]}") ;;
+        qwen)    react_script=qwen_port.py ;;
+        react)   react_script=noharness.py ;;
+        harness) react_script=yesharnessgpt.py ;;
+    esac
+    case "$sys" in
+        qwen|react|harness)
+            rm -f "${dir}"/*.json
+            (cd "$REACT_DIR" && python "$react_script" "${react[@]}")
+            echo "commit=${COMMIT} script=${react_script} model=${MODEL} date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                > "${dir}/PROVENANCE" ;;
         memory)  "${ace[@]}" --systems memory_only $RT_FLAG ;;
         debater) "${ace[@]}" --systems intra ;;
         dual)    "${ace[@]}" --systems dual $RT_FLAG ;;
@@ -161,6 +200,11 @@ echo "Cells (${#CELLS[@]}): ${CELLS[*]}"
 echo "=========================================="
 
 # ── vLLM (same server flags as the original runs) ────────────────────────────
+if curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" >/dev/null 2>&1; then
+    echo "ERROR: a server is already listening on port ${VLLM_PORT}; refusing to run on a server this job" \
+         "does not own" >&2
+    exit 1
+fi
 VLLM_PID=""
 cleanup() { [[ -n "$VLLM_PID" ]] && kill "$VLLM_PID" 2>/dev/null && wait "$VLLM_PID" 2>/dev/null || true; }
 trap cleanup EXIT
@@ -184,7 +228,8 @@ done
 
 # ── Table ────────────────────────────────────────────────────────────────────
 TITLE="$(echo "$RUN_LABEL" | sed -E 's/^run/RUN /')"
-TABLE_ARGS=(--root "$RUN_DIR" --title "$TITLE" --out "${RUN_DIR}/table.tsv")
+EXPECT="$(for c in "${CELLS[@]}"; do printf '%s ' "$c"; done)"
+TABLE_ARGS=(--root "$RUN_DIR" --title "$TITLE" --out "${RUN_DIR}/table.tsv" --expect "$EXPECT")
 [[ -n "${BASE_TSV:-}" ]] && TABLE_ARGS+=(--base "$BASE_TSV")
 echo ""
 echo "=========================================="

@@ -51,6 +51,8 @@ def _normalize_lessons(raw):
     of {"lesson": str, "confidence": "high"|"medium"|"low"}, capped, so a
     malformed or overlong response can't flood the Consolidator."""
     out = []
+    if isinstance(raw, (dict, int, float)):  # used to crash on slicing; any other shape behaves as before
+        raw = []
     for item in (raw or [])[:_MAX_LESSONS_PER_CALL]:
         if isinstance(item, dict):
             text = str(item.get("lesson", "")).strip()
@@ -89,14 +91,14 @@ def _as_bool(value, default):
 
 def _normalize_candidate_checks(raw, n_candidates):
     out = []
-    for item in (raw or [])[:n_candidates]:
+    for item in (raw if isinstance(raw, list) else [])[:n_candidates]:
         if not isinstance(item, dict):
             continue
         cid = str(item.get("id", "")).strip().upper()
         verdict = str(item.get("verdict", "")).strip().lower()
         if verdict in _CANDIDATE_VERDICTS and cid.startswith("C") and cid[1:].isdigit() \
                 and int(cid[1:]) < n_candidates:
-            out.append({"id": cid, "verdict": verdict, "reason": str(item.get("reason", "")).strip()})
+            out.append({"id": f"C{int(cid[1:])}", "verdict": verdict, "reason": str(item.get("reason", "")).strip()})
     return out
 
 
@@ -106,7 +108,7 @@ def _normalize_bullet_checks(raw, cap=_MAX_BULLET_CHECKS_PER_CALL):
     evidence-grounded path to a bullet's helpful/harmful count — separate
     from (and a check on) the Consolidator's text-similarity-based updates."""
     out = []
-    for item in (raw or [])[:cap]:
+    for item in (raw if isinstance(raw, list) else [])[:cap]:
         if not isinstance(item, dict):
             continue
         bid = str(item.get("id", "")).strip()
@@ -418,24 +420,22 @@ Proposed target allocations: {proposed_allocations}"""
         raw_verdict = str(parsed.get("verdict", "")).strip().lower() if isinstance(parsed, dict) else ""
         parse_ok = raw_verdict in ("accept", "revise")
         parsed = parsed if isinstance(parsed, dict) else {}
-        # verdict_norm mirrors how every legacy loop reads "verdict": a missing
-        # verdict / unparseable reply stops the loop like an accept, any other
-        # string keeps refining. parse_ok separates a real accept from that default.
-        if parse_ok:
-            verdict_norm = raw_verdict
-        else:
-            verdict_norm = "accept" if "verdict" not in parsed else "revise"
+        # verdict_norm is exactly how every legacy loop reads "verdict" (only the
+        # literal "accept", or a missing verdict, stops refinement), so ADAP-v2
+        # stops on the same replies DEBATER/DUAL stop on. parse_ok separates a
+        # well-formed reply from that missing-verdict default.
+        verdict_norm = "accept" if parsed.get("verdict", "accept") == "accept" else "revise"
         direction = parsed.get("direction", "well_calibrated")
         if direction not in ("increase_conviction", "decrease_risk", "well_calibrated"):
             direction = "well_calibrated"
         # g_sto (AdaReMo Algorithm 2): should the lessons from this round be
         # stored in persistent memory? Default False (conservative): only store
         # when the Debater explicitly confirms the lessons are novel.
-        should_store = _as_bool(parsed.get("should_store", False), False)
+        should_store = bool(parsed.get("should_store", False))
         # g_ref (AdaReMo Algorithm 2): should the refinement loop continue?
         # False when the critic has no actionable fix to offer — stop early
         # even if verdict is "revise" (0 additional rounds needed).
-        should_refine = _as_bool(parsed.get("should_refine", True), True)
+        should_refine = bool(parsed.get("should_refine", True))
         return {
             "verdict": parsed.get("verdict", "accept"),
             "direction": direction,
@@ -445,6 +445,10 @@ Proposed target allocations: {proposed_allocations}"""
             "should_refine": should_refine,
             "parse_ok": parse_ok,
             "verdict_norm": verdict_norm,
+            # ADAP-v2 governance signals: same fields, but "false"/"no"/null parsed
+            # correctly (bool("false") is True). Legacy readers keep the fields above.
+            "store_signal": _as_bool(parsed.get("should_store", False), False),
+            "refine_signal": _as_bool(parsed.get("should_refine", True), True),
         }
 
     def post_task_reflect(self, decision_date, next_date, executed_allocations,
@@ -512,7 +516,8 @@ Realized per-asset returns to {next_date} (%): {realized_return_pct}"""
         return {
             "lessons": _normalize_lessons(parsed.get("lessons")),
             "bullet_checks": _normalize_bullet_checks(parsed.get("bullet_checks"),
-                                                      cap=bullet_check_cap or _MAX_BULLET_CHECKS_PER_CALL),
+                                                      cap=_MAX_BULLET_CHECKS_PER_CALL if bullet_check_cap is None
+                                                      else bullet_check_cap),
             "candidate_checks": _normalize_candidate_checks(parsed.get("candidate_checks"), len(candidates)),
             "realized_return_pct": realized_return_pct,
             "parse_ok": parse_ok,

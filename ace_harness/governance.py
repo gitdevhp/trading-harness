@@ -5,19 +5,31 @@ one signal finance offers that AppWorld/Formula do not: the realized outcome
 of a decision, which becomes known one rebalance later.
 
   1. Refinement (g_ref)  — the critic may stop refinement early; a round that
-     no longer moves the proposal also stops it; the critic is not consulted
-     on the final round, where its verdict cannot change what is executed.
+     no longer moves the proposal also stops it; under submit_policy='last'
+     the critic is not consulted on the final round, where its verdict cannot
+     change what is executed.
   2. Storage (g_sto)     — the critic only NOMINATES lessons. They are graded
      against next month's realized returns and stored only if confirmed.
   3. Freeze with probes  — memory updates stop when recent consolidation
      demand falls below a threshold; periodic probes can reopen memory.
-Plus evidence-gated exposure: the Solver/critic only see bullets that
-realized data has confirmed at least once.
+Plus evidence-gated exposure: the Solver/critic only see bullets whose
+current text realized data has confirmed (a Curator rewrite of a bullet's
+text sends it back to probation until it is confirmed again).
 
-All defaults are fixed a priori (not tuned on any evaluation period). Each
-mechanism is one GovernanceConfig field, so every mechanism can be ablated,
-and the 'dual_equiv' / 'debater_equiv' presets reproduce DUAL and DEBATER
-exactly (same LLM call sequence).
+Notes for the paper:
+  * The critic judges should_store novelty against what it is shown, i.e. the
+    validated subset; nominations are still deduplicated by the Curator, which
+    sees the full memory, before anything is stored.
+  * The Reflector gets a larger output budget (800 vs 550 tokens) only when it
+    must also grade candidates/probationary bullets — part of the mechanism.
+  * All GovernanceConfig defaults below were fixed before any ADAP-v2 run (not
+    tuned on any evaluation period). The critic prompt itself is the one shared
+    with DEBATER/DUAL; it was last revised on 2026-09-22 (b2c9a69) after
+    inspecting 2024-Q1 debug runs, which applies to every critic-based system.
+
+Each mechanism is one GovernanceConfig field, so every mechanism can be
+ablated, and the 'dual_equiv' / 'debater_equiv' presets reproduce DUAL and
+DEBATER exactly (same LLM call sequence).
 """
 import dataclasses
 import hashlib
@@ -117,13 +129,13 @@ def l1_pp(a: dict, b: dict) -> float:
 
 def stage_lessons(reviewed_rounds, cfg: GovernanceConfig, admitted: bool):
     """Lessons the critic nominated for storage this task (g_sto): from
-    parseable reviews with should_store, at least stage_min_confidence."""
+    parseable reviews with store_signal, at least stage_min_confidence."""
     if cfg.stage_requires_admission and not admitted:
         return []
     floor = _CONF_RANK[cfg.stage_min_confidence]
     out, seen = [], set()
     for review in reviewed_rounds:
-        if not (review.get("parse_ok") and review.get("should_store")):
+        if not (review.get("parse_ok") and review.get("store_signal")):
             continue
         for lesson in review.get("lessons") or []:
             key = lesson["lesson"].strip().lower()
@@ -135,10 +147,12 @@ def stage_lessons(reviewed_rounds, cfg: GovernanceConfig, admitted: bool):
 
 class FreezeController:
     """Sliding-window freeze with probes. Demand d_t in {0,1} is recorded for
-    open tasks; once at least `min_slow_loops` outcome reflections have run and
-    the mean demand over the last `window` tasks is below `tau`, memory freezes.
-    While frozen, every `probe_every`-th task is a probe that runs the full
-    memory update; a probe with demand reopens memory and resets the window."""
+    open tasks (None = no information this task, e.g. the critic was never
+    consulted, and is not recorded); once at least `min_slow_loops` outcome
+    reflections have run and the mean demand over the last `window` recorded
+    tasks is below `tau`, memory freezes. While frozen, every `probe_every`-th
+    task is a probe that runs the full memory update; a probe with demand
+    reopens memory and resets the window."""
 
     def __init__(self, window=3, tau=1 / 3, probe_every=3, min_slow_loops=None):
         self.window, self.tau, self.probe_every = window, tau, probe_every
@@ -162,13 +176,14 @@ class FreezeController:
         if mode == "frozen":
             return None
         if mode == "probe":
-            if demand:
+            if demand:  # None (no information) keeps memory frozen
                 self.frozen, self.demand, self._frozen_tasks = False, [], 0
                 self.n_reopens += 1
                 return "reopened"
             return "stayed_frozen"
-        self.demand = (self.demand + [int(bool(demand))])[-self.window:]
         self.n_slow_loops += int(bool(slow_loop_ran))
+        if demand is not None:
+            self.demand = (self.demand + [int(bool(demand))])[-self.window:]
         if (self.n_slow_loops >= self.min_slow_loops and len(self.demand) == self.window
                 and sum(self.demand) / self.window < self.tau):
             self.frozen, self._frozen_tasks = True, 0
@@ -189,14 +204,22 @@ class EvidenceStore:
     def __init__(self, counts=None):
         self.counts = {bid: dict(c) for bid, c in (counts or {}).items()}
 
-    def apply_checks(self, checks):
+    def apply_checks(self, checks, memory):
+        """Only ids that exist now: a check citing a not-yet-created id must
+        not pre-validate whichever bullet the Curator creates under it."""
         for check in checks or []:
-            entry = self.counts.setdefault(check["id"], {"conf": 0, "contra": 0})
-            entry["conf" if check["verdict"] == "confirmed" else "contra"] += 1
+            if check["id"] in memory.bullets:
+                entry = self.counts.setdefault(check["id"], {"conf": 0, "contra": 0})
+                entry["conf" if check["verdict"] == "confirmed" else "contra"] += 1
+
+    def reset_confirmations(self, ids):
+        """A bullet whose text was rewritten must earn confirmation again;
+        contradictions are kept so a discredited bullet stays hidden."""
+        for bid in ids:
+            self.counts.setdefault(bid, {"conf": 0, "contra": 0})["conf"] = 0
 
     def sync(self, memory):
-        """Drop ids no longer in memory; new bullets start at 0/0. Replaced
-        bullets keep their evidence, matching how memory keeps their counts."""
+        """Drop ids no longer in memory; new bullets start at 0/0."""
         self.counts = {bid: self.counts.get(bid, {"conf": 0, "contra": 0}) for bid in memory.bullets}
 
     def net(self, bid) -> int:

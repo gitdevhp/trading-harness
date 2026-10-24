@@ -55,6 +55,10 @@ DEFAULT_UNIVERSE = [
 
 _MEMORY_SYSTEMS = ("inter", "dual", "memory_only", "dual_permanent", "adap_v2", "remo")
 _V2_PRESETS = {"adap_v2": "v2", "debater_stop": "debater_stop", "remo": "remo"}
+_ROUND_SYSTEMS = ("intra", "dual", "dual_session", *_V2_PRESETS)
+# set through their own flags so tag, manifest and every system stay consistent
+_RESERVED_GOV_KEYS = {"use_risk_tuner": "--no_adaptive_risk", "debater_sizing_context": "--debater_sizing_context",
+                      "max_rounds": "--max_rounds"}
 SYSTEMS = ["baseline", "intra", "inter", "dual", "dual_session", "memory_only", "dual_permanent",
            *_V2_PRESETS]
 
@@ -93,10 +97,13 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
                 rebalance_days=20, max_rounds=3, use_risk_harness=True, risk_harness_type="conviction",
                 adaptive_risk=True, include_screener_tool=True, fallback_mode="equal_weight",
                 truncate_context=False, max_tokens=800, gov_overrides=None, gov_tag=None,
-                resume_memory=False, debater_sizing_context=False):
+                init_memory=None, debater_sizing_context=False):
     run_args = dict(locals())
     if gov_overrides and system not in _V2_PRESETS:
         raise ValueError("--gov applies only to " + ", ".join(_V2_PRESETS))
+    reserved = sorted(set(gov_overrides or {}) & set(_RESERVED_GOV_KEYS))
+    if reserved:
+        raise ValueError(f"set {reserved} with " + ", ".join(_RESERVED_GOV_KEYS[k] for k in reserved) + ", not --gov")
     universe = build_universe(tickers, start, end)
     solver = Solver(universe, include_screener_tool=include_screener_tool, fallback_mode=fallback_mode,
                      max_tokens=max_tokens, truncate_context=truncate_context, prompt_style="monthly")
@@ -105,6 +112,9 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
     is_adaptive = use_risk_harness and adaptive_risk and system in _MEMORY_SYSTEMS
 
     tag = f"monthly_{system}" + (f"_{gov_tag}" if gov_tag else "")
+    if system in _ROUND_SYSTEMS:  # non-default ablations never overwrite the main outputs
+        tag += "_sizing" if debater_sizing_context else ""
+        tag += f"_k{max_rounds}" if max_rounds != 3 else ""
     if not include_screener_tool:
         tag += "_noscreener"
     if use_risk_harness:
@@ -121,7 +131,7 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
     extra = {"tag": tag, "risk_tuner": is_adaptive, "debater_sizing_context": debater_sizing_context}
 
     def memory_for_run():
-        memory, info = accounting.prepare_memory(memory_path, resume=resume_memory,
+        memory, info = accounting.prepare_memory(memory_path, init_from=init_memory,
                                                  evidence_path=paths["evidence"])
         extra.update(info)
         return memory
@@ -171,7 +181,11 @@ def run_system(system, tickers, start, end, output_dir, initial_capital=1_000_00
         cfg = governance.make_config(_V2_PRESETS[system], gov_overrides, max_rounds=max_rounds,
                                      debater_sizing_context=debater_sizing_context, use_risk_tuner=is_adaptive)
         memory = memory_for_run() if cfg.memory == "on" else ExperienceMemory()
-        evidence = governance.EvidenceStore.load(paths["evidence"]) if extra.get("resumed_memory") else None
+        evidence = governance.EvidenceStore.load(extra.get("init_evidence_from"))
+        if extra.get("init_memory_from") and not extra.get("init_evidence_from") \
+                and cfg.exposure_mode == "evidence_gated":
+            print("WARNING: --init_memory has no _evidence.json next to it; every warm-start bullet starts "
+                  "on probation and is hidden from the Solver until realized data confirms it")
         extra.update(governance=governance.config_dict(cfg), governance_hash=governance.config_hash(cfg),
                      governance_preset=_V2_PRESETS[system])
         decision_fn = make_autogover_v2(
@@ -226,14 +240,21 @@ def main():
     parser.add_argument("--debater_sizing_context", action="store_true",
                          help="give the Debater the universe-relative sizing block — applies to every debate "
                               "system (intra, dual, adap_v2, remo, debater_stop) alike")
-    parser.add_argument("--resume_memory", action="store_true",
-                         help="load an existing playbook from --output_dir. Only valid to warm-start a NEW "
-                              "period from a finished run; by default a stale playbook is moved aside")
+    parser.add_argument("--init_memory", metavar="PLAYBOOK",
+                         help="warm-start memory from ANOTHER finished run's *_playbook.txt (and its "
+                              "_evidence.json, if present), e.g. to carry 2024 memory into 2025; the source is "
+                              "never modified. Without it memory starts empty and any playbook left in "
+                              "--output_dir is moved aside")
     args = parser.parse_args()
 
     overrides = dict(governance.parse_override(o) for o in args.gov)
     if overrides and not args.gov_tag:
         parser.error("--gov requires --gov_tag")
+    if overrides and any(s not in _V2_PRESETS for s in args.systems):
+        parser.error("--gov applies only to " + ", ".join(_V2_PRESETS))
+    reserved = sorted(set(overrides) & set(_RESERVED_GOV_KEYS))
+    if reserved:
+        parser.error(f"set {reserved} with " + ", ".join(_RESERVED_GOV_KEYS[k] for k in reserved) + ", not --gov")
 
     os.makedirs(args.output_dir, exist_ok=True)
     for system in args.systems:
@@ -243,7 +264,7 @@ def main():
             use_risk_harness=not args.no_risk_harness, risk_harness_type=args.risk_harness_type,
             adaptive_risk=not args.no_adaptive_risk, include_screener_tool=not args.no_screener,
             fallback_mode=args.fallback_mode, truncate_context=args.truncate_context, max_tokens=args.max_tokens,
-            gov_overrides=overrides, gov_tag=args.gov_tag, resume_memory=args.resume_memory,
+            gov_overrides=overrides, gov_tag=args.gov_tag, init_memory=args.init_memory,
             debater_sizing_context=args.debater_sizing_context,
         )
 

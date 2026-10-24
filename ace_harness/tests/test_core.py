@@ -136,16 +136,23 @@ def test_fresh_memory_guard():
     from ace_harness import accounting
     from ace_harness.memory import ExperienceMemory
     with tempfile.TemporaryDirectory() as tmp:
-        path = os.path.join(tmp, "playbook.txt")
+        path = os.path.join(tmp, "monthly_dual_playbook.txt")
         m = ExperienceMemory()
         m.add_bullet("RISK LESSONS", "Lesson learned in December")
         m.save(path)
         mem, info = accounting.prepare_memory(path)
         assert len(mem.bullets) == 0 and not os.path.exists(path) and info["stale_files_moved"]
+        source = os.path.join(tmp, "finished_2024_playbook.txt")
+        m.save(source)
+        mem, info = accounting.prepare_memory(path, init_from=source)
+        assert len(mem.bullets) == 1 and info["init_memory_from"] and os.path.exists(source)
         m.save(path)
-        mem, info = accounting.prepare_memory(path, resume=True)
-        assert len(mem.bullets) == 1 and info["resumed_memory"]
-    print("[accounting] stale playbook moved aside by default; loaded only with resume=True")
+        try:
+            accounting.prepare_memory(path, init_from=path)
+            raise AssertionError("warm-starting from this run's own output path must be refused")
+        except ValueError:
+            pass
+    print("[accounting] stale playbook always moved aside; --init_memory reads another run, never overwrites it")
 
 
 def test_make_table_merges_new_cells_into_base():
@@ -188,7 +195,35 @@ def test_make_table_merges_new_cells_into_base():
     assert by_key[("QWEN", "sp30")][3] == new[3] and by_key[("QWEN", "sp30")][10] == "", "ReAct dict read; no tokens"
     assert [r[2] for r in rows] == ["tech18", "tech18", "sp30", "sp30"], "canonical universe order"
     assert sum(1 for s, _ in sources if s == "NEW") == 2
+
+    # single rounding from raw values (compare_results.metrics pre-rounds to 3 dp)
+    raw = make_table.raw_metrics(results)
+    assert new[6] == str(round(raw["sharpe"], 2)) and new[8] == str(round(raw["calmar"], 2))
     print("[make_table] RUN 1 table: new cells replace base rows, others kept; ReAct + ace outputs read")
+
+
+def test_make_table_base_blocks_and_expect():
+    from ace_harness import make_table
+    header = "\t".join(make_table.HEADER)
+    text = ("RUN 1\r\n" + header + "\r\n" + "qwen25\tQWEN\ttech18\t1\t1\t1\t1\t1\t1\t-1\t\t\t\t\r\n"
+            + "qwen36\tQWEN\ttech18\t9\t9\t9\t9\t9\t9\t-9\t\t\t\t\r\n"
+            + "\r\nRUN 2\r\n" + header + "\r\n" + "qwen25\tQWEN\ttech18\t2\t2\t2\t2\t2\t2\t-2\t\t\t\t\r\n")
+    with tempfile.TemporaryDirectory() as tmp:
+        base = os.path.join(tmp, "sheet.tsv")
+        with open(base, "w", newline="") as f:
+            f.write(text)
+        rows = make_table.read_base(base, "qwen25")
+        assert rows[("QWEN", "tech18")][3] == "1", "only RUN 1 block and only this model are read"
+        os.makedirs(os.path.join(tmp, "run1"))
+        try:
+            make_table.build(os.path.join(tmp, "run1"), base=base, expect=["sp30:qwen"])
+            raise AssertionError("a missing expected cell must raise")
+        except RuntimeError:
+            pass
+    print("[make_table] reads only the first block of a multi-run sheet; missing expected cells raise")
+
+
+
 
 
 def run_all():
@@ -198,6 +233,7 @@ def run_all():
     test_decision_log_and_token_sidecar()
     test_fresh_memory_guard()
     test_make_table_merges_new_cells_into_base()
+    test_make_table_base_blocks_and_expect()
     print("CORE TESTS PASSED")
 
 

@@ -96,7 +96,7 @@ def _versions():
 
 
 def build_manifest(output_file, system, args: dict, universe, extra=None) -> dict:
-    status = _git("status", "--porcelain")
+    status = _git("status", "--porcelain", "--untracked-files=no")  # run outputs are untracked
     manifest = {
         "status": "running",
         "system": system,
@@ -135,26 +135,43 @@ def finalize_manifest(path, **updates):
 def _move_aside(path):
     stale = f"{path}.stale.{_utc_now().replace(':', '')}"
     shutil.move(path, stale)
-    print(f"WARNING: moved pre-existing {path} -> {stale} (starting from EMPTY memory; "
-          f"pass --resume_memory only to warm-start a NEW period from a finished run)")
+    print(f"WARNING: moved pre-existing {path} -> {stale} (a playbook left in the output directory is "
+          f"from an earlier run of this window; reusing it would be look-ahead)")
     return stale
 
 
-def prepare_memory(memory_path, resume=False, evidence_path=None):
-    """(ExperienceMemory, info). A playbook found at memory_path was written by
-    an earlier run of this same output directory — typically a crashed run of
-    the same window, whose lessons come from LATER months than the ones about
-    to be replayed. Reusing it would be look-ahead, so by default it is moved
-    aside and memory starts empty."""
+def evidence_path_for(playbook_path):
+    suffix = "_playbook.txt"
+    return playbook_path[:-len(suffix)] + "_evidence.json" if playbook_path.endswith(suffix) else None
+
+
+def prepare_memory(memory_path, init_from=None, evidence_path=None):
+    """(ExperienceMemory, info). Any playbook/evidence already at this run's
+    paths was written by an earlier run of the same output directory —
+    typically a crashed run of the same window, whose lessons come from LATER
+    months than the ones about to be replayed — so it is always moved aside.
+
+    init_from: optional playbook of a DIFFERENT, finished run (e.g. last
+    year's) to warm-start from. It is only read, never overwritten; its
+    evidence sidecar, if any, is reported in info["init_evidence_from"]."""
     from ace_harness.memory import ExperienceMemory
-    info = {"resumed_memory": False, "stale_files_moved": []}
-    if resume and os.path.exists(memory_path):
-        memory = ExperienceMemory.load(memory_path)
-        info["resumed_memory"] = True
+    info = {"init_memory_from": None, "init_evidence_from": None, "stale_files_moved": []}
+    if init_from:
+        if not os.path.exists(init_from):
+            raise FileNotFoundError(f"--init_memory {init_from} does not exist")
+        if os.path.abspath(init_from) == os.path.abspath(memory_path):
+            raise ValueError("--init_memory must point at another (finished) run's playbook, "
+                             "not this run's own output path")
+    for p in (memory_path, evidence_path):
+        if p and os.path.exists(p):
+            info["stale_files_moved"].append(_move_aside(p))
+    if init_from:
+        memory = ExperienceMemory.load(init_from)
+        src_evidence = evidence_path_for(init_from)
+        info["init_memory_from"] = os.path.abspath(init_from)
+        info["init_evidence_from"] = os.path.abspath(src_evidence) if src_evidence and os.path.exists(src_evidence) \
+            else None
     else:
-        for p in (memory_path, evidence_path):
-            if p and os.path.exists(p):
-                info["stale_files_moved"].append(_move_aside(p))
         memory = ExperienceMemory()
     info["initial_memory_bullets"] = len(memory.bullets)
     return memory, info
@@ -195,7 +212,7 @@ def wrap_with_decision_log(decision_fn, log_path, universe, risk_harness=None):
                 for key in ("verdict", "direction", "should_refine", "should_store", "parse_ok"):
                     entry[key] = review.get(key)
                 entry["n_lessons"] = len(review.get("lessons") or [])
-                entry["feedback"] = (review.get("feedback") or "")[:300]
+                entry["feedback"] = str(review.get("feedback") or "")[:300]
             if stateless and alloc:
                 entry["harnessed"] = risk_harness.apply(alloc, current_date, portfolio_state["portfolio_value"])
             rounds.append(entry)

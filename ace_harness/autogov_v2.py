@@ -36,20 +36,29 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
     n_stocks = len(universe.anon_universe) if cfg.debater_sizing_context else None
     pending = {"staged": []}  # lessons nominated last task, awaiting realized verification
 
-    def consolidate(lessons):
+    def consolidate(lessons, gov):
         # Like DUAL: the Curator makes no LLM call for an empty lesson list, but
         # apply_delta_ops still runs (it prunes bullets the checks just discredited).
+        before = {bid: b["content"] for bid, b in memory.bullets.items()}
         ops = consolidator.consolidate(memory, lessons, memory.sections)
         added = memory.apply_delta_ops(ops)["added_ids"]
         evidence.sync(memory)
-        return added
+        rewritten = [bid for bid, b in memory.bullets.items() if bid in before and b["content"] != before[bid]]
+        if gated:  # evidence belongs to the graded text: a rewrite goes back to probation
+            evidence.reset_confirmations(rewritten)
+        gov["n_new_bullets"] += len(added)
+        gov["added_ids"] += added
+        gov["rewritten_ids"] += rewritten
+        return bool(lessons)
 
     def decision_fn(current_date, portfolio_state, decision_log, rebalance_days):
         mode = freeze.begin_task() if freeze else "open"
         frozen_before = freeze.frozen if freeze else False
         staged, pending["staged"] = pending["staged"], []
-        gov = {"mode": mode, "n_staged_graded": len(staged) if mode != "frozen" else 0, "n_confirmed": 0,
-               "n_new_bullets": 0, "slow_loop": False}
+        gov = {"mode": mode, "n_staged_graded": 0, "n_confirmed": 0, "n_new_bullets": 0,
+               "added_ids": [], "rewritten_ids": [], "slow_loop": False,
+               "n_staged_dropped": len(staged) if mode == "frozen" else 0}  # frozen: memory stays unchanged
+        consolidated = False
 
         # --- B. slow loop: realized-outcome reflection --------------------------
         past_dates = sorted(decision_log.keys())
@@ -67,11 +76,13 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
                 bullet_check_cap=cfg.reflect_bullet_check_cap if gated else None,
             )
             _apply_bullet_checks(memory, reflection.get("bullet_checks"))
-            evidence.apply_checks(reflection.get("bullet_checks"))
-            confirmed_ids = {c["id"] for c in reflection.get("candidate_checks", []) if c["verdict"] == "confirmed"}
-            confirmed = [lesson for i, lesson in enumerate(staged) if f"C{i}" in confirmed_ids] if deferred else []
-            gov["n_confirmed"] = len(confirmed)
-            gov["n_new_bullets"] += len(consolidate(list(reflection["lessons"]) + confirmed))
+            evidence.apply_checks(reflection.get("bullet_checks"), memory)
+            checks = reflection.get("candidate_checks", []) if deferred else []
+            confirmed_ids = {c["id"] for c in checks if c["verdict"] == "confirmed"}
+            confirmed = [lesson for i, lesson in enumerate(staged) if f"C{i}" in confirmed_ids]
+            gov.update(n_staged_graded=len(checks), n_confirmed=len(confirmed))
+            consolidate(list(reflection["lessons"]) + confirmed, gov)
+            consolidated = bool(confirmed)  # last task's critic lessons entered memory now
             gov["slow_loop"] = True
 
             if tuner is not None:
@@ -106,7 +117,7 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
                 rounds_log.append({"round": r, "allocations": alloc})
                 stop_reason = "converged"
                 break
-            if r == cfg.max_rounds and cfg.skip_terminal_review:
+            if r == cfg.max_rounds and cfg.skip_terminal_review and cfg.submit_policy == "last":
                 rounds_log.append({"round": r, "allocations": alloc})
                 stop_reason = "terminal"
                 break
@@ -118,7 +129,7 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
                 admitted = review["parse_ok"]
                 stop_reason = "accept" if admitted else "parse_fail"
                 break
-            if cfg.use_critic_gref and review["parse_ok"] and not review["should_refine"]:
+            if cfg.use_critic_gref and review["parse_ok"] and not review["refine_signal"]:
                 stop_reason = "g_ref"
                 break
             feedback, direction = review["feedback"], review.get("direction")
@@ -130,7 +141,6 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
         final_alloc = allocs[submitted_round - 1]
 
         # --- F. storage ------------------------------------------------------------
-        consolidated = False
         if memory_on and mode != "frozen":
             if cfg.storage_mode == "deferred_verified":
                 pending["staged"] = stage_lessons(reviewed, cfg, admitted)
@@ -143,8 +153,7 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
                 else:                                           # immediate_gsto
                     lessons = stage_lessons(reviewed, cfg, admitted)
                 if lessons is not None:
-                    gov["n_new_bullets"] += len(consolidate(lessons))
-                    consolidated = bool(lessons)
+                    consolidated = consolidate(lessons, gov) or consolidated
         if memory_on:
             memory.save(memory_path)
             if evidence_path:
@@ -152,7 +161,9 @@ def make_autogover_v2(universe, solver, debater, consolidator, memory, memory_pa
 
         # --- G. demand -> freeze / probe / reopen ----------------------------------
         if cfg.demand_signal == "gsto":
-            demand = int(any(rv["parse_ok"] and rv["should_store"] for rv in reviewed))
+            parsed_reviews = [rv for rv in reviewed if rv["parse_ok"]]
+            # no parseable critic review this task (e.g. max_rounds=1): no information
+            demand = int(any(rv["store_signal"] for rv in parsed_reviews)) if parsed_reviews else None
         else:
             demand = int(gov["n_new_bullets"] > 0)
         transition = freeze.end_task(mode, demand, gov["slow_loop"]) if freeze else None

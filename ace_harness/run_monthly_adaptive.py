@@ -38,7 +38,7 @@ DEFAULT_UNIVERSE = [
 def run_adaptive(tickers, start, end, output_dir,
                  initial_capital=1_000_000.0, rebalance_days=20,
                  include_screener_tool=True, fallback_mode="equal_weight",
-                 truncate_context=False, max_tokens=800, resume_memory=False):
+                 truncate_context=False, max_tokens=800, init_memory=None):
     run_args = dict(locals())
     universe = MarketUniverse(tickers)
     universe.prefetch(start, end)
@@ -51,7 +51,7 @@ def run_adaptive(tickers, start, end, output_dir,
 
     tag = "monthly_adaptive_autogover"
     memory_path = os.path.join(output_dir, f"{tag}_playbook.txt")
-    memory, mem_info = accounting.prepare_memory(memory_path, resume=resume_memory)
+    memory, mem_info = accounting.prepare_memory(memory_path, init_from=init_memory)
 
     risk_harness = ConvictionHarness(universe)
     risk_params_path = os.path.join(output_dir, f"{tag}_riskparams.json")
@@ -83,8 +83,8 @@ def main():
     parser.add_argument("--fallback_mode", choices=["cash", "equal_weight"], default="equal_weight")
     parser.add_argument("--truncate_context", action="store_true")
     parser.add_argument("--max_tokens", type=int, default=800)
-    parser.add_argument("--resume_memory", action="store_true",
-                        help="load an existing playbook (only to warm-start a NEW period)")
+    parser.add_argument("--init_memory", metavar="PLAYBOOK",
+                        help="warm-start from ANOTHER finished run's playbook (never modified)")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -93,7 +93,7 @@ def main():
         initial_capital=args.initial_capital, rebalance_days=args.rebalance_days,
         include_screener_tool=not args.no_screener, fallback_mode=args.fallback_mode,
         truncate_context=args.truncate_context, max_tokens=args.max_tokens,
-        resume_memory=args.resume_memory,
+        init_memory=args.init_memory,
     )
 
 

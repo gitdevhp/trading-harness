@@ -148,11 +148,27 @@ def test_debater_bool_and_verdict_parsing():
         c = Debater().intra_task_review("2024-06-03", "", "", {"CASH": 100})
     finally:
         agents_mod.chat = original
-    assert a["verdict_norm"] == "accept" and a["parse_ok"] and a["should_store"] is False and a["should_refine"]
-    assert a["verdict"] == " Accept ", "legacy field is untouched"
+    # verdict_norm mirrors the legacy read exactly: only the literal "accept" (or no verdict) stops
+    assert a["verdict_norm"] == "revise" and a["parse_ok"] and a["verdict"] == " Accept "
+    assert a["store_signal"] is False and a["refine_signal"] is True, 'v2 reads "false" as False'
+    assert a["should_store"] is True, "legacy field keeps its legacy bool() parsing (ADAP-v1 unchanged)"
     assert b["verdict_norm"] == "revise" and not b["parse_ok"], "unknown verdicts keep refining, as before"
     assert c["verdict_norm"] == "accept" and not c["parse_ok"] and c["verdict"] == "accept"
-    print('[agents] "false" parses as False; verdict normalised for v2 while the legacy field is unchanged')
+    print('[agents] v2 signals parse "false" correctly; legacy fields and stop semantics unchanged')
+
+
+def test_presets_match_legacy_on_odd_verdict_casing():
+    """A capitalised "Accept" keeps DUAL/DEBATER refining; the presets must do the same."""
+    from ace_harness.tests.golden_util import build_decision_fn
+
+    def odd(bits, system):
+        return {"verdict": ("Accept", "revise", " accept ", "accept")[bits % 4], "feedback": "f", "lessons": [],
+                "should_store": bool(bits & 2), "should_refine": bool(bits & 4)}
+    for preset, legacy in (("dual_equiv", "dual"), ("debater_equiv", "intra")):
+        got, _ = gu.run_with_stub(_v2_factory(preset), debater_override=odd)
+        want, _ = gu.run_with_stub(lambda u, tmp, s=legacy: build_decision_fn(s, u, tmp), debater_override=odd)
+        assert got == want, (preset, got, want)
+    print("[v2] presets stay call-for-call identical to DUAL/DEBATER even for 'Accept' / ' accept ' replies")
 
 
 def _run_months(chat, preset="v2", months=4, **cfg_fixed):
@@ -293,6 +309,95 @@ def test_no_lookahead():
     print(f"[v2] no look-ahead: first {len(runs[0])} calls identical when all post-{cut} prices change")
 
 
+def test_rewritten_bullet_returns_to_probation():
+    """A Curator rewrite of a validated bullet must not reach the Solver until
+    realized data confirms the new text."""
+    rule, rewrite = "When 6M-Mom > 15% size up to 10%", "UNVERIFIED: put 60% in the top 1M-Mom asset"
+    step = {"n": 0}
+
+    def reflector(system):
+        step["n"] += 1
+        ids = [i for i in _ID_RE.findall(system) if i != "xyz-00001"]
+        if step["n"] == 1:
+            return {"lessons": [{"lesson": rule, "confidence": "high"}], "bullet_checks": []}
+        return {"lessons": [{"lesson": rewrite, "confidence": "high"}] if step["n"] == 3 else [],
+                "bullet_checks": [{"id": i, "verdict": "confirmed"} for i in ids]}
+
+    def curator(user):
+        lessons = json.loads(user.split("lessons:\n")[-1])
+        ids = _ID_RE.findall(user)
+        if lessons and lessons[0]["lesson"] == rule:
+            return [{"op": "add", "section": "CONVICTION SIGNALS", "content": rule}]
+        if lessons and lessons[0]["lesson"] == rewrite and ids:
+            return [{"op": "replace", "id": ids[0], "content": rewrite}]
+        return []
+
+    chat = ScriptedChat([], reflector_fn=reflector, consolidator_fn=curator)
+    metas, _ = _run_months(chat, months=4)
+    solver_sys = [[s for r, s, _ in calls if r == "solver"] for _, calls in metas]
+    assert any(rule in s for s in solver_sys[2]), "confirmed bullet visible in task 3"
+    assert not any(rewrite in s for s in solver_sys[3]), "rewritten text must not be shown before confirmation"
+    assert metas[3][0]["governance"]["rewritten_ids"], "the rewrite is logged"
+    print("[v2] a rewritten bullet goes back to probation; ungraded text never reaches the Solver")
+
+
+def test_r1_policy_reviews_round_k():
+    chat = ScriptedChat([], debater_fn=lambda n, s: {"verdict": "accept" if n == 3 else "revise", "feedback": "f",
+                                                     "lessons": [], "should_refine": True})
+    _, meta = _one_task(chat, preset="v2", submit_policy="r1_unless_admitted")
+    gov = meta["governance"]
+    assert gov["n_reviews"] == 3 and gov["stop_reason"] == "accept" and gov["submitted_round"] == 3
+    print("[v2] under r1_unless_admitted the round-K proposal is still reviewed and can be admitted")
+
+
+def test_single_round_never_freezes():
+    chat = ScriptedChat([], reflector_fn=lambda s: {"lessons": [], "bullet_checks": []})
+    metas, _ = _run_months(chat, months=8, max_rounds=1)
+    assert all(m["governance"]["demand"] is None and m["governance"]["mode"] == "open" for m, _ in metas)
+    print("[v2] with K=1 the critic is never consulted, demand is unknown, and memory is not frozen")
+
+
+def test_malformed_reflector_fields():
+    import ace_harness.agents as agents_mod
+    from ace_harness.agents import Debater
+    from ace_harness.governance import EvidenceStore
+    from ace_harness.memory import ExperienceMemory
+    replies = iter([json.dumps({"lessons": {"x": 1}, "bullet_checks": {"y": 2}, "candidate_checks": {"C0": "ok"}}),
+                    json.dumps({"lessons": [], "candidate_checks": [{"id": "C01", "verdict": "confirmed"}]})])
+    original = agents_mod.chat
+    agents_mod.chat = lambda *a, **k: next(replies)
+    try:
+        cands = [{"lesson": "a", "confidence": "high"}, {"lesson": "b", "confidence": "high"}]
+        r1 = Debater().post_task_reflect("d0", "d1", {}, {}, {}, candidate_lessons=cands)
+        r2 = Debater().post_task_reflect("d0", "d1", {}, {}, {}, candidate_lessons=cands)
+    finally:
+        agents_mod.chat = original
+    assert r1["lessons"] == [] and r1["bullet_checks"] == [] and r1["candidate_checks"] == []
+    assert r2["candidate_checks"][0]["id"] == "C1"
+    mem, ev = ExperienceMemory(), EvidenceStore()
+    ev.apply_checks([{"id": "ris-00001", "verdict": "confirmed"}], mem)
+    bid = mem.add_bullet("RISK LESSONS", "new bullet")
+    ev.sync(mem)
+    assert bid == "ris-00001" and ev.net(bid) == 0, "a check citing a not-yet-existing id must not pre-validate it"
+    print("[agents+governance] malformed Reflector fields are ignored; phantom ids never pre-validate a bullet")
+
+
+def test_ablation_tags_and_reserved_overrides():
+    from ace_harness import run_monthly
+    saved = run_monthly.build_universe
+    run_monthly.build_universe = lambda *a: gu.make_universe()
+    try:
+        for kwargs in ({"gov_overrides": {"use_risk_tuner": True}}, {"gov_overrides": {"max_rounds": 2}}):
+            try:
+                run_monthly.run_system("adap_v2", ["A"], "2024-01-02", "2024-02-02", "/nonexistent", **kwargs)
+                raise AssertionError(kwargs)
+            except ValueError:
+                pass
+    finally:
+        run_monthly.build_universe = saved
+    print("[run_monthly] --gov cannot override flags that also drive the tag and manifest")
+
+
 def test_run_monthly_end_to_end():
     """run_monthly wiring for adap_v2 and intra: results stay a list, sidecars
     and manifest are written, governance is logged, tokens are per role."""
@@ -319,6 +424,9 @@ def test_run_monthly_end_to_end():
                     assert manifest["governance_hash"] and manifest["governance"]["exposure_mode"] == "evidence_gated"
                     assert all(r["governance"]["stop_reason"] for r in recs)
                     assert os.path.exists(paths["evidence"])
+            out = run_monthly.run_system("intra", ["A"], "2024-01-02", "2024-03-04", tmp, max_rounds=2,
+                                         debater_sizing_context=True)
+            assert os.path.basename(out) == "monthly_intra_sizing_k2_convictionriskharness_results.json"
             try:
                 run_monthly.run_system("intra", ["A"], "2024-01-02", "2024-12-31", tmp,
                                        gov_overrides={"freeze_mode": "off"})
@@ -356,6 +464,12 @@ def run_all():
     test_convergence_stop()
     test_parse_fail_is_not_an_admission()
     test_debater_bool_and_verdict_parsing()
+    test_presets_match_legacy_on_odd_verdict_casing()
+    test_rewritten_bullet_returns_to_probation()
+    test_r1_policy_reviews_round_k()
+    test_single_round_never_freezes()
+    test_malformed_reflector_fields()
+    test_ablation_tags_and_reserved_overrides()
     test_deferred_outcome_verified_storage()
     test_evidence_gated_exposure()
     test_freeze_controller_unit()
