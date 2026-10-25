@@ -20,8 +20,8 @@ Notes for the paper:
   * The critic judges should_store novelty against what it is shown, i.e. the
     validated subset; nominations are still deduplicated by the Curator, which
     sees the full memory, before anything is stored.
-  * The Reflector gets a larger output budget (800 vs 550 tokens) only when it
-    must also grade candidates/probationary bullets — part of the mechanism.
+  * Every system's Reflector has the same output budget (agents.py). Until
+    RUN 1, ADAP's was 800 and the others' 550, and both cut off most replies.
   * All GovernanceConfig defaults below were fixed before any ADAP-v2 run (not
     tuned on any evaluation period). The critic prompt itself is the one shared
     with DEBATER/DUAL; it was last revised on 2026-09-22 (b2c9a69) after

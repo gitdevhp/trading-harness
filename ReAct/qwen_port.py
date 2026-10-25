@@ -3,12 +3,17 @@ import json
 import os
 import random
 import re
+import sys
 import time
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
+
+# repo root, so the shared price snapshot (ace_harness/price_cache.py) is importable
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ace_harness import price_cache  # noqa: E402
 
 
 def _anon_label(i):
@@ -212,56 +217,62 @@ def prefetch_data(start_date, end_date):
             f"{download_start} -> {download_end}"
         )
 
-        df = None
+        def _download():
 
-        try:
-            df = yf.download(
-                ticker,
-                start=download_start,
-                end=download_end,
-                auto_adjust=True,
-                actions=False,
-                progress=False,
-                threads=False,
-            )
-
-        except Exception as e:
-            print(
-                f"WARNING: yf.download failed "
-                f"for {ticker}: {e}"
-            )
-
-        if df is None or df.empty:
-
-            print(
-                f"Retrying {ticker} using "
-                f"Ticker.history()..."
-            )
+            df = None
 
             try:
-                df = yf.Ticker(
-                    ticker
-                ).history(
+                df = yf.download(
+                    ticker,
                     start=download_start,
                     end=download_end,
                     auto_adjust=True,
                     actions=False,
+                    progress=False,
+                    threads=False,
                 )
 
             except Exception as e:
-                raise ValueError(
-                    f"Could not download usable "
-                    f"data for {ticker}: {e}"
+                print(
+                    f"WARNING: yf.download failed "
+                    f"for {ticker}: {e}"
                 )
 
-        try:
-            cleaned = _clean_download(df)
+            if df is None or df.empty:
 
-        except Exception as e:
-            raise ValueError(
-                f"No usable market data for "
-                f"{ticker}: {e}"
-            )
+                print(
+                    f"Retrying {ticker} using "
+                    f"Ticker.history()..."
+                )
+
+                try:
+                    df = yf.Ticker(
+                        ticker
+                    ).history(
+                        start=download_start,
+                        end=download_end,
+                        auto_adjust=True,
+                        actions=False,
+                    )
+
+                except Exception as e:
+                    raise ValueError(
+                        f"Could not download usable "
+                        f"data for {ticker}: {e}"
+                    )
+
+            try:
+                return _clean_download(df)
+
+            except Exception as e:
+                raise ValueError(
+                    f"No usable market data for "
+                    f"{ticker}: {e}"
+                )
+
+        cleaned = price_cache.fetch(
+            "qwen_port", ticker, download_start, download_end, _download
+        )
 
         GLOBAL_DATA_CACHE[
             ANONYMOUS_MAP[ticker]

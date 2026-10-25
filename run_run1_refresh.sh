@@ -33,16 +33,36 @@
 #                       A RUN_DIR started with one setting refuses to resume with the other.
 #   REUSE_DEBATER=1     do not re-run DEBATER in the 4 small universes — only if job
 #                       1706716 ran on a checkout that already contained b2c9a69.
-#   FULL=1              re-run all 42 cells from this commit (maximum consistency).
+#   FULL=1              all 42 cells, i.e. QWEN/REACT/HARNESS in every universe as well. Replicates
+#                       use FULL=1, and summarize_runs needs every run to hold the same cells, so
+#                       complete a FULL=0 run by re-submitting it with the same OUT_ROOT and
+#                       RUN_LABEL plus FULL=1 (finished cells are skipped; only the rest run).
 #   EXTRAS=1            also run the rows that tie the extension to the peer's paper:
 #                       REMO (faithful ReMo Alg. 1), AUTOGOV (faithful AutoGovern Alg. 2;
 #                       ADAP = AUTOGOV + outcome grounding) and DEBATER+STOP (ADAP's stops
 #                       without memory).
 #   RUN_LABEL=run1      output subdirectory; use run2 / run3 for replicates (FULL=1).
+#   ONLY="u:s u:s"      run exactly these cells instead (e.g. ONLY="mag7:adap sp30:qwen"
+#                       END_DATE=2024-03-31 for a quick GPU smoke test).
 #   BASE_TSV=path       your current RUN 1 table (TSV, same columns): the printed
 #                       table merges the new cells into it.
 #   OUT_ROOT=dir        default ${ROOT_DIR}/run1_refresh_<jobid>; re-submit with the same
-#                       OUT_ROOT to resume (finished cells are skipped).
+#                       OUT_ROOT to resume (finished cells are skipped). A RUN_DIR remembers its
+#                       dates, model and budgets (RUN_CONFIG) and refuses to resume with others.
+#                       Prices are downloaded once into OUT_ROOT/price_cache and reused under that
+#                       OUT_ROOT: all ace cells of every replicate read one snapshot, and each ReAct
+#                       script (QWEN, REACT, HARNESS) reads its own snapshot in every replicate.
+#                       RUN_CONFIG also holds the commit: never pull or edit this checkout while a
+#                       campaign is running, and never resume a pre-fix OUT_ROOT (refresh_2024).
+#
+# Submit from the repo root (SLURM writes log/run1_refresh_<jobid>.out there; log/ must exist).
+# Every job serves vLLM on port 8000, so chain the replicates instead of running them together
+# (pass every variable inline: sbatch exports the submitting shell's environment):
+#   C=$PWD/campaign_2024
+#   j1=$(OUT_ROOT=$C RUN_LABEL=run1 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
+#   j2=$(OUT_ROOT=$C RUN_LABEL=run2 FULL=1 EXTRAS=1 sbatch --parsable --dependency=afterany:${j1%%;*} run_run1_refresh.sh)
+#   OUT_ROOT=$C RUN_LABEL=run3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:${j2%%;*} run_run1_refresh.sh
+# After a run: python -m ace_harness.audit_run $C/run1 [$C/run2 ...] checks every cell from its sidecars.
 
 set -euo pipefail
 
@@ -100,13 +120,34 @@ if [[ -f "${RUN_DIR}/RISK_TUNER" && "$(cat "${RUN_DIR}/RISK_TUNER")" != "$RISK_T
 fi
 echo "$RISK_TUNER" > "${RUN_DIR}/RISK_TUNER"
 export RISK_TUNER
-
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-    echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true"
-fi
 COMMIT="$(git rev-parse HEAD)"
+RUN_CONFIG="start=${START_DATE} end=${END_DATE} model=${MODEL} max_tokens=${MAX_TOKENS} capital=${INITIAL_CAPITAL} rebalance_days=${REBALANCE_DAYS} commit=${COMMIT}"
+if [[ -f "${RUN_DIR}/RUN_CONFIG" && "$(cat "${RUN_DIR}/RUN_CONFIG")" != "$RUN_CONFIG" ]]; then
+    echo "ERROR: ${RUN_DIR} was started with '$(cat "${RUN_DIR}/RUN_CONFIG")', not '${RUN_CONFIG}';" \
+         "use a new OUT_ROOT/RUN_LABEL" >&2
+    exit 1
+fi
+echo "$RUN_CONFIG" > "${RUN_DIR}/RUN_CONFIG"
+# one price snapshot per OUT_ROOT: every cell and replicate reads identical data (ace_harness/price_cache.py)
+export ACE_PRICE_CACHE="${OUT_ROOT}/price_cache"
+
+DIRTY=0
+if [[ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=all)" ]]; then  # nested repos are not run code
+    echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true" \
+         "(diff saved to ${RUN_DIR}/git_diff_${JOB_ID}.patch)"
+    DIRTY=1
+fi
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) job=${JOB_ID} commit=${COMMIT} risk_tuner=${RISK_TUNER}" \
     | tee -a "${RUN_DIR}/COMMIT"
+if [[ "$DIRTY" == "1" ]]; then
+    git diff HEAD --ignore-submodules=all > "${RUN_DIR}/git_diff_${JOB_ID}.patch"
+fi
+{   # software and weights this job ran with
+    echo "job=${JOB_ID} host=$(hostname) commit=${COMMIT}"
+    nvidia-smi -L 2>/dev/null || true
+    echo "model_snapshot=$(cat "${HF_HOME}/hub/models--${MODEL//\//--}/refs/main" 2>/dev/null || echo unknown)"
+    pip freeze 2>/dev/null | grep -iE '^(vllm|torch|transformers|openai|yfinance|pandas|numpy)==' || true
+} > "${RUN_DIR}/ENV_${JOB_ID}.txt"
 
 SMALL=(tech18 mag7 balanced15 volatile25)
 LARGE=(sp30 diversified40)
@@ -128,6 +169,13 @@ else
 fi
 if [[ "$EXTRAS" == "1" ]]; then
     for u in "${ALL_UNIVERSES[@]}"; do add "$u" remo; add "$u" autogov; add "$u" debater_stop; done
+fi
+if [[ -n "${ONLY:-}" ]]; then
+    read -ra CELLS <<< "$ONLY"
+    for c in "${CELLS[@]}"; do
+        [[ "$c" =~ ^(tech18|mag7|balanced15|sp30|diversified40|volatile25):(qwen|react|harness|memory|debater|dual|adap|remo|autogov|debater_stop)$ ]] \
+            || { echo "ONLY: bad cell '$c' (want universe:system)" >&2; exit 1; }
+    done
 fi
 
 get_tickers() { python -m ace_harness.universes "$1"; }
@@ -199,7 +247,7 @@ run_cell() {
 echo "=========================================="
 echo "RUN 1 REFRESH  (${RUN_LABEL})"
 echo "Model: ${MODEL}  temperature 0.0  |  RiskTuner: ${RISK_TUNER}  |  FULL=${FULL}  EXTRAS=${EXTRAS}"
-echo "Period: ${START_DATE} -> ${END_DATE}  |  Output: ${RUN_DIR}"
+echo "Period: ${START_DATE} -> ${END_DATE}  |  Output: ${RUN_DIR}  |  Prices: ${ACE_PRICE_CACHE}"
 echo "Cells (${#CELLS[@]}): ${CELLS[*]}"
 echo "=========================================="
 
@@ -229,6 +277,9 @@ echo "vLLM online: ${SERVED}"
 for cell in "${CELLS[@]}"; do
     run_cell "${cell%%:*}" "${cell##*:}"
 done
+if compgen -G "${ACE_PRICE_CACHE}/*.pkl" >/dev/null; then  # the snapshot this run read; audit_run compares runs
+    (cd "$ACE_PRICE_CACHE" && sha256sum -- *.pkl) > "${RUN_DIR}/price_cache.sha256"
+fi
 
 # ── Table ────────────────────────────────────────────────────────────────────
 TITLE="$(echo "$RUN_LABEL" | sed -E 's/^run/RUN /')"

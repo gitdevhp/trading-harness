@@ -69,9 +69,25 @@ class FakeOpenAI:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
 
 
-def with_real_chat(stub):
+class CappedFakeOpenAI:
+    """FakeOpenAI that stops a reply at max_tokens, as vLLM does: the text is
+    cut, completion_tokens equals max_tokens and finish_reason is "length"."""
+
+    def __init__(self, reply_fn):
+        def create(model, messages, temperature, max_tokens, stop):
+            text = reply_fn(model, messages, temperature=temperature, max_tokens=max_tokens, stop=stop)
+            finish = "stop"
+            if len(text) // 4 > max_tokens:
+                text, finish = text[:max_tokens * 4], "length"
+            p = sum(len(m["content"]) for m in messages) // 4
+            choice = types.SimpleNamespace(message=types.SimpleNamespace(content=text), finish_reason=finish)
+            return types.SimpleNamespace(usage=_Usage(p, len(text) // 4), choices=[choice])
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+
+
+def with_real_chat(stub, client=FakeOpenAI):
     """Context manager: route agents.chat through the real llm_client.chat
-    backed by FakeOpenAI(stub), so token accounting is exercised."""
+    backed by client(stub), so token accounting is exercised."""
     import contextlib
     import ace_harness.agents as agents_mod
     import ace_harness.llm_client as llm
@@ -79,7 +95,7 @@ def with_real_chat(stub):
     @contextlib.contextmanager
     def cm():
         saved = (agents_mod.chat, llm._client)
-        llm._client = FakeOpenAI(stub)
+        llm._client = client(stub)
         agents_mod.chat = getattr(llm, "_unpatched_chat", llm.chat)
         llm.reset_token_counts()
         try:
@@ -223,6 +239,264 @@ def test_make_table_base_blocks_and_expect():
     print("[make_table] reads only the first block of a multi-run sheet; missing expected cells raise")
 
 
+def test_audit_run():
+    """audit_run finds what the SLURM log cannot show: Reflector replies cut
+    off at their output cap (and the Curator calls that therefore never
+    happen), unparseable or oddly cased critic verdicts, a cell whose
+    backtest is shorter than requested, and data_hash drift across runs."""
+    import inspect
+    import shutil
+    import ace_harness.agents as agents_mod
+    from ace_harness import audit_run, make_table, run_monthly
+
+    src = inspect.getsource(agents_mod)
+    assert agents_mod.REFLECTOR_MAX_TOKENS == 4096 and "max_tokens=REFLECTOR_MAX_TOKENS)" in src
+    assert agents_mod.CURATOR_MAX_TOKENS == 2048 and "max_tokens=CURATOR_MAX_TOKENS)" in src
+    assert agents_mod.DEBATER_MAX_TOKENS == 600 and "max_tokens=DEBATER_MAX_TOKENS)" in src
+    assert audit_run.REFLECTOR_CAPS == (550, 800) and audit_run.CURATOR_CAP == 800, "caps of runs up to RUN 1"
+    assert list(audit_run.UNIVERSES) == make_table.UNIVERSES
+    assert list(audit_run.SYSTEMS) == [s for s, _ in make_table.SYSTEMS]
+    assert "ace_harness" not in "".join(l for l in inspect.getsource(audit_run).splitlines(True)
+                                        if l.startswith(("import", "from"))), "audit_run must stay stdlib-only"
+    assert audit_run._is_equal_weight({"A": 50.0, "B": 50.0, "CASH": 0.0}, 2)
+    assert not audit_run._is_equal_weight({"A": 50.0, "B": 50.0, "CASH": 0.0}, 3)
+    assert not audit_run._is_equal_weight({"A": 45.0, "B": 45.0, "CASH": 10.0}, 2)
+    from ace_harness.memory import ExperienceMemory
+    m = ExperienceMemory()
+    m.add_bullet("RISK LESSONS", "Cap at 5% when 1M-Vol > 30%")
+    m.add_bullet("CONVICTION SIGNALS", "Size up when 6M-Mom > 20%")
+    with tempfile.TemporaryDirectory() as tmp:
+        m.save(os.path.join(tmp, "pb.txt"))
+        with open(os.path.join(tmp, "pb.txt")) as f:
+            assert sum(bool(audit_run._BULLET_RE.match(line)) for line in f) == 2, "playbook bullet count"
+
+    u = gu.make_universe()
+    base_stub = gu.HashChat(u.anon_universe)
+
+    def long_reflector(model, messages, **kw):  # a Reflector reply longer than its output budget
+        text = base_stub(model, messages, **kw)
+        if messages[0]["content"].startswith("You are a portfolio Reflector"):
+            out = json.loads(text)
+            out["lessons"] = [{"lesson": "When 1M-Vol > 30% cut to 4% " + "x" * 20000, "confidence": "high"}]
+            return json.dumps(out)
+        return text
+
+    def odd_critic(bits, system):  # half the replies have no JSON, half say "Accept"
+        return "no json here" if bits % 2 else {"verdict": "Accept", "feedback": "fine", "lessons": []}
+
+    saved = run_monthly.build_universe
+    run_monthly.build_universe = lambda tickers, start, end: gu.make_universe()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run1 = os.path.join(tmp, "run1")
+            def cell(system):
+                path = os.path.join(run1, "tech18", system)
+                os.makedirs(path, exist_ok=True)
+                return path
+            with with_real_chat(long_reflector, client=CappedFakeOpenAI):
+                run_monthly.run_system("memory_only", list("ABCDE"), "2024-01-02", "2024-12-31", cell("memory"),
+                                       adaptive_risk=False)
+                run_monthly.run_system("adap_v2", list("ABCDE"), "2024-01-02", "2024-12-31", cell("adap"),
+                                       adaptive_risk=False)
+            with with_real_chat(gu.HashChat(u.anon_universe, debater_override=odd_critic)):
+                run_monthly.run_system("intra", list("ABCDE"), "2024-01-02", "2024-12-31", cell("debater"))
+            with open(os.path.join(cell("qwen"), "qwen_results_raw.json"), "w") as f:
+                json.dump({"daily_nav": [{"date": "2024-01-02", "portfolio_value": 1.0},
+                                         {"date": "2024-06-28", "portfolio_value": 1.1}]}, f)
+            from ace_harness import accounting
+            head = accounting._git("rev-parse", "HEAD")
+            with open(os.path.join(cell("qwen"), "PROVENANCE"), "w") as f:
+                f.write(f"commit={head} script=qwen_port.py model=m date=2026-10-25T00:00:00Z\n")
+
+            run = audit_run.audit_run(run1)
+            by = {c["system"]: c for c in run["cells"]}
+            assert [c["system"] for c in run["cells"]] == ["qwen", "memory", "debater", "adap"], "table order"
+            assert run["window"] == ("2024-01-02", "2024-12-31")
+            mem = by["memory"]
+            assert mem["status"] == "complete" and mem["tasks"] == 11
+            assert mem["reflector"]["calls"] == mem["reflector"]["at_cap"] == mem["reflector"]["unparsed"] == 10, \
+                "every cut-off (and therefore unparsed) reply is counted"
+            assert mem["truncation_counted"] and mem["truncated"] == {"reflector": 10} == mem["unparsed"]
+            assert mem["reflector"]["max_completion"] == 4096 and mem["budgets"]["reflector"] == 4096
+            assert any("reflector replies did not parse" in f for f in mem["flags"])
+            assert mem["curator"]["calls"] == 0, "no lessons survive, so the Curator never runs"
+            assert mem["memory_size"] == 0 and any("Reflector replies stopped" in f for f in mem["flags"])
+            deb = by["debater"]
+            assert deb["critic"]["parse_fail"] == deb["critic"]["parse_fail_read_as_accept"] > 0
+            assert deb["critic"]["verdicts"]["Accept"] > 0 and deb["critic"]["accept"] == 0
+            assert any("Accept" in f for f in deb["flags"]) and any("did not parse" in f for f in deb["flags"])
+            adap = by["adap"]
+            assert adap["gov"]["tasks"] == 11 and sum(adap["gov"]["stops"].values()) == 11
+            assert any("covers 2024-01-02..2024-06-28" in f for f in by["qwen"]["flags"])
+            assert by["qwen"]["git_sha"] == head and by["qwen"]["kind"] == "react"
+            assert audit_run._campaign_flags([run]) == [], "one run, one commit: no campaign flag"
+
+            run2 = os.path.join(tmp, "run2")
+            shutil.copytree(run1, run2)
+            # a run from before the cut-off counters: fall back to completion == a known cap
+            tok_path = glob_one(os.path.join(run2, "tech18", "memory", "*_tokens.json"))
+            tok = json.load(open(tok_path))
+            tok["totals"].pop("truncated")
+            for task in tok["per_task"]:
+                for counts in task["by_role"].values():
+                    counts.pop("truncated"), counts.pop("unparsed")
+                if "reflector" in task["by_role"]:
+                    task["by_role"]["reflector"]["completion"] = 550
+            json.dump(tok, open(tok_path, "w"))
+            legacy = {c["system"]: c for c in audit_run.audit_run(run2)["cells"]}["memory"]
+            assert not legacy["truncation_counted"] and legacy["reflector"]["at_cap"] == 10
+            man_path = glob_one(os.path.join(run2, "tech18", "debater", "*_manifest.json"))
+            man = json.load(open(man_path))
+            man["data_hash"], man["git_sha"] = "f" * 64, "0123456789abcdef"
+            json.dump(man, open(man_path, "w"))
+            for root, digest in ((run1, "a" * 64), (run2, "b" * 64)):
+                with open(os.path.join(root, "price_cache.sha256"), "w") as f:
+                    f.write(f"{'c' * 64}  ace__AAA__2023-01-01__2025-01-01.pkl\n{digest}  ace__BBB__2023-01-01__2025-01-01.pkl\n")
+            run = audit_run.audit_run(run1)
+            text, flagged = audit_run.render([run, audit_run.audit_run(run2)])
+            assert flagged and "FLAGS\n" in text and "Reflector replies stopped" in text
+            assert "DIFFERS within the run" in text and "differs across runs" in text
+            assert "cells ran on different commits" in text and "0123456" in text
+            assert "read different price files than" in text and "ace__BBB__2023-01-01__2025-01-01.pkl" in text
+            assert "ace__AAA" not in text.split("read different price files")[1].split("\n")[0]
+    finally:
+        run_monthly.build_universe = saved
+    import ace_harness.llm_client as llm
+    from ace_harness.agents import Consolidator
+    from ace_harness.memory import ExperienceMemory
+    saved_chat = agents_mod.chat
+    try:
+        for reply, counted in (("Here are the ops: [{\"op\": \"add\"", 1), ("[]", 0), ("no changes", 1),
+                               ('[{"op": "update", "id": "x-00001", "helpful": 1}]', 0)):
+            agents_mod.chat = lambda *a, **k: reply
+            before = llm.get_token_counts()["unparsed"]
+            Consolidator().consolidate(ExperienceMemory(), [{"lesson": "l", "confidence": "high"}], ["RISK LESSONS"])
+            assert llm.get_token_counts()["unparsed"] - before == counted, reply
+    finally:
+        agents_mod.chat = saved_chat
+    print("[audit_run] cut-off and unparsed replies of every role, skipped Curator calls, odd verdicts, short "
+          "windows, data_hash drift and mixed commits/snapshots across runs are all flagged")
+
+
+def test_preflight():
+    import pandas as pd
+    from ace_harness import preflight
+    days = pd.bdate_range("2024-01-02", "2025-12-31")
+
+    def fake_download(ticker, start, end):
+        assert (start, end) == ("2024-01-02", "2026-01-01"), "365-day lookback, end inclusive"
+        if ticker == "BAD":
+            raise ValueError("no data")
+        idx = days[days < "2025-07-16"] if ticker == "SHORT" else days
+        close = pd.Series(100.0, index=idx)
+        if ticker == "JUMP":
+            close[idx >= "2025-03-03"] = 50.0
+        return pd.DataFrame({"Close": close})
+
+    lines, problems = preflight.check("2025-01-01", "2025-12-31", download=fake_download,
+                                      universes={"u1": ["OK", "JUMP"], "u2": ["OK", "SHORT"], "u3": ["BAD"]})
+    text = "\n".join(lines)
+    assert any(p.startswith("SHORT: ends 2025-07-15") for p in problems)
+    assert any(p.startswith("BAD: download failed") for p in problems) and len(problems) == 2
+    assert "('2025-03-03', -50.0)" in text and "u2             common trading days=140 2025-01-01..2025-07-15" in text
+    assert "u3             missing ['BAD']" in text
+    print("[preflight] failed downloads, short tickers and big one-day moves are reported")
+
+
+def test_price_cache():
+    """With ACE_PRICE_CACHE set, the ACE engine and all three ReAct baselines
+    download each ticker once per campaign and every later cell reads the
+    identical frame; without it they download as before."""
+    import importlib.util
+    import pandas as pd
+    from ace_harness import accounting, market, price_cache
+
+    days = pd.bdate_range("2023-01-03", "2024-12-31")
+    calls = []
+
+    def fake_yf_download(ticker, start=None, end=None, **kw):
+        calls.append((ticker, start, end))
+        noise = len(calls) * 1e-5  # Yahoo's adjusted prices differ slightly on every request
+        close = pd.Series([100.0 + noise + i for i in range(len(days))], index=days)
+        return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close, "Volume": 1.0})
+
+    saved_env, saved_yf = os.environ.get(price_cache.ENV), market.yf.download
+    market.yf.download = fake_yf_download
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ.pop(price_cache.ENV, None)
+            u1, u2 = market.MarketUniverse(["AAA", "BBB"]), market.MarketUniverse(["AAA", "BBB"])
+            u1.prefetch("2024-01-02", "2024-12-31")
+            u2.prefetch("2024-01-02", "2024-12-31")
+            assert len(calls) == 4 and accounting.data_hash(u1) != accounting.data_hash(u2), "no cache: as before"
+
+            os.environ[price_cache.ENV] = os.path.join(tmp, "price_cache")
+            calls.clear()
+            u1, u2 = market.MarketUniverse(["AAA", "BBB"]), market.MarketUniverse(["AAA", "BBB"])
+            u1.prefetch("2024-01-02", "2024-12-31")
+            u2.prefetch("2024-01-02", "2024-12-31")
+            assert len(calls) == 2 and accounting.data_hash(u1) == accounting.data_hash(u2), "one download, same data"
+            for anon in u1.anon_universe:
+                pd.testing.assert_frame_equal(u1.data_cache[anon], u2.data_cache[anon])
+
+            react_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ReAct")
+            for script, start in (("qwen_port", "2024-01-02"), ("noharness", "2024-01-02"),
+                                  ("yesharnessgpt", "2023-01-02")):
+                frames = []
+                for _ in range(2):
+                    spec = importlib.util.spec_from_file_location(f"_react_{script}",
+                                                                  os.path.join(react_dir, f"{script}.py"))
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    mod.yf.download = fake_yf_download  # same yfinance module object as market.yf
+                    mod.setup_universe(["AAA", "BBB"])
+                    calls.clear()
+                    mod.prefetch_data("2024-01-02", "2024-12-31")
+                    frames.append((len(calls), dict(mod.GLOBAL_DATA_CACHE)))
+                (n_first, first), (n_second, second) = frames
+                assert n_second == 0 and set(first) == set(second), (script, n_first, n_second)
+                for anon in first:
+                    pd.testing.assert_frame_equal(first[anon], second[anon])
+                assert any(f.startswith(f"{script}__AAA__{start}__") for f in os.listdir(os.environ[price_cache.ENV]))
+            # a racing writer stored its frame first: every caller gets that one canonical snapshot
+            racer = pd.DataFrame({"Close": [1.0, 2.0]}, index=pd.to_datetime(["2024-01-02", "2024-01-03"]))
+
+            def download_while_racer_writes():
+                racer.to_pickle(price_cache._path("race", "AAA", "s", "e"))
+                return racer * 10
+            os.makedirs(os.environ[price_cache.ENV], exist_ok=True)
+            pd.testing.assert_frame_equal(price_cache.fetch("race", "AAA", "s", "e", download_while_racer_writes), racer)
+            assert not [f for f in os.listdir(os.environ[price_cache.ENV]) if f.endswith(".tmp")]
+
+            # preflight stores exactly the frames MarketUniverse.prefetch then reads (same key, no download)
+            from ace_harness import preflight
+            saved_pf = preflight._download_ticker
+            preflight._download_ticker = lambda t, s, e: market._clean_download(fake_yf_download(t, s, e), t)
+            try:
+                lines, problems = preflight.check("2024-01-02", "2024-12-31", universes={"u": ["CCC", "DDD"]})
+            finally:
+                preflight._download_ticker = saved_pf
+            assert not problems, problems
+            market.yf.download = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must read the snapshot"))
+            u3 = market.MarketUniverse(["CCC", "DDD"])
+            u3.prefetch("2024-01-02", "2024-12-31")
+            assert len(u3.common_trading_days("2024-01-02", "2024-12-31")) > 200
+    finally:
+        market.yf.download = saved_yf
+        if saved_env is None:
+            os.environ.pop(price_cache.ENV, None)
+        else:
+            os.environ[price_cache.ENV] = saved_env
+    print("[price_cache] ACE + QWEN/REACT/HARNESS download once per campaign; later cells read identical frames")
+
+
+def glob_one(pattern):
+    import glob
+    matches = glob.glob(pattern)
+    assert len(matches) == 1, (pattern, matches)
+    return matches[0]
+
+
 
 
 
@@ -256,6 +530,9 @@ def run_all():
     test_make_table_merges_new_cells_into_base()
     test_make_table_base_blocks_and_expect()
     test_summarize_runs()
+    test_audit_run()
+    test_preflight()
+    test_price_cache()
     print("CORE TESTS PASSED")
 
 

@@ -26,7 +26,9 @@ _ROLE_PREFIXES = (
 
 
 def _zero():
-    return {"prompt": 0, "completion": 0, "total": 0, "calls": 0}
+    # truncated: replies that stopped at max_tokens (finish_reason "length");
+    # unparsed: replies a caller could not parse, so their content was dropped
+    return {"prompt": 0, "completion": 0, "total": 0, "calls": 0, "truncated": 0, "unparsed": 0}
 
 
 # Cumulative token usage across all chat() calls in this process.
@@ -64,6 +66,12 @@ def reset_token_counts():
     _role_counts.clear()
 
 
+def note_unparsed(role):
+    """Count a reply whose JSON the caller could not parse."""
+    _token_counts["unparsed"] += 1
+    _role_counts.setdefault(role, _zero())["unparsed"] += 1
+
+
 def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
     response = get_client().chat.completions.create(
         model=model, messages=messages, temperature=temperature,
@@ -80,6 +88,9 @@ def chat(model, messages, temperature=0.0, max_tokens=700, stop=None):
             role[key] += n
     _token_counts["calls"] += 1
     role["calls"] += 1
+    if getattr(response.choices[0], "finish_reason", None) == "length":
+        _token_counts["truncated"] += 1
+        role["truncated"] += 1
     msg = response.choices[0].message
     # Primary: content field.
     text = (msg.content or "").strip()

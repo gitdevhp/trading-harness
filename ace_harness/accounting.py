@@ -95,8 +95,15 @@ def _versions():
     return out
 
 
+def _output_budgets(args):
+    from ace_harness import agents  # late import: agents imports llm_client, as this module does
+    return {"solver": (args or {}).get("max_tokens"), "debater": agents.DEBATER_MAX_TOKENS,
+            "reflector": agents.REFLECTOR_MAX_TOKENS, "curator": agents.CURATOR_MAX_TOKENS}
+
+
 def build_manifest(output_file, system, args: dict, universe, extra=None) -> dict:
-    status = _git("status", "--porcelain", "--untracked-files=no")  # run outputs are untracked
+    # run outputs are untracked; nested repos (portbench) are not run code
+    status = _git("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all")
     manifest = {
         "status": "running",
         "system": system,
@@ -110,6 +117,7 @@ def build_manifest(output_file, system, args: dict, universe, extra=None) -> dic
                    "consolidator": llm_client.CONSOLIDATOR_MODEL},
         "llm_base_url": llm_client.API_BASE_URL,
         "temperature": 0.0,
+        "output_budgets": _output_budgets(args),
         "env": {k: v for k, v in os.environ.items()
                 if k.startswith(("ACE_", "SLURM_JOB_ID", "SLURM_ARRAY")) and k not in _SECRET_ENV},
         "versions": _versions(),
@@ -178,7 +186,8 @@ def prepare_memory(memory_path, init_from=None, evidence_path=None):
 
 
 def _usage_delta(before, after):
-    return {k: after.get(k, 0) - before.get(k, 0) for k in ("calls", "prompt", "completion", "total")}
+    return {k: after.get(k, 0) - before.get(k, 0)
+            for k in ("calls", "prompt", "completion", "total", "truncated", "unparsed")}
 
 
 def wrap_with_decision_log(decision_fn, log_path, universe, risk_harness=None):

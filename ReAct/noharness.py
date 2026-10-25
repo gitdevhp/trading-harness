@@ -2,12 +2,17 @@ import argparse
 import json
 import os
 import re
+import sys
 import time
 
 import numpy as np
 import pandas as pd
 import yfinance as yf
 from openai import OpenAI
+
+# repo root, so the shared price snapshot (ace_harness/price_cache.py) is importable
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from ace_harness import price_cache  # noqa: E402
 
 
 def _anon_label(i):
@@ -316,10 +321,13 @@ def prefetch_data(
             f"Downloading {ticker}..."
         )
 
-        df = _download_ticker(
-            ticker,
-            download_start,
-            download_end,
+        df = price_cache.fetch(
+            "noharness", ticker, download_start, download_end,
+            lambda: _download_ticker(
+                ticker,
+                download_start,
+                download_end,
+            ),
         )
 
         GLOBAL_DATA_CACHE[
