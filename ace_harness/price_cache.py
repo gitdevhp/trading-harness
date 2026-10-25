@@ -13,6 +13,7 @@ The ACE engine and the three ReAct baselines each keep their own entries
 (source), because each script cleans the raw download its own way.
 """
 import os
+import socket
 
 import pandas as pd
 
@@ -30,9 +31,20 @@ def fetch(source, ticker, start, end, download):
     if path and os.path.exists(path):
         return pd.read_pickle(path)
     df = download()
-    if path:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        tmp = f"{path}.{os.getpid()}.tmp"
+    if not path:
+        return df
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = f"{path}.{socket.gethostname()}.{os.getpid()}.tmp"
+    try:
         df.to_pickle(tmp)
-        os.replace(tmp, path)  # atomic: a crashed write never leaves a partial snapshot
-    return df
+        try:
+            os.link(tmp, path)  # atomic, and the first writer wins if two cells race
+        except FileExistsError:
+            pass
+        except OSError:  # filesystem without hard links
+            if not os.path.exists(path):
+                os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return pd.read_pickle(path)  # even the cell that downloaded uses the stored snapshot

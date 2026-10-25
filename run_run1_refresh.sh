@@ -49,14 +49,20 @@
 #   OUT_ROOT=dir        default ${ROOT_DIR}/run1_refresh_<jobid>; re-submit with the same
 #                       OUT_ROOT to resume (finished cells are skipped). A RUN_DIR remembers its
 #                       dates, model and budgets (RUN_CONFIG) and refuses to resume with others.
-#                       Prices are downloaded once into OUT_ROOT/price_cache and reused by every
-#                       cell and replicate under that OUT_ROOT, so all of them read identical data.
+#                       Prices are downloaded once into OUT_ROOT/price_cache and reused under that
+#                       OUT_ROOT: all ace cells of every replicate read one snapshot, and each ReAct
+#                       script (QWEN, REACT, HARNESS) reads its own snapshot in every replicate.
+#                       RUN_CONFIG also holds the commit: never pull or edit this checkout while a
+#                       campaign is running, and never resume a pre-fix OUT_ROOT (refresh_2024).
 #
 # Submit from the repo root (SLURM writes log/run1_refresh_<jobid>.out there; log/ must exist).
-# Every job serves vLLM on port 8000, so chain several runs instead of running them together:
-#   j=$(OUT_ROOT=$PWD/refresh_2024 RUN_LABEL=run2 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
-#   OUT_ROOT=$PWD/refresh_2024 RUN_LABEL=run3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:$j run_run1_refresh.sh
-# After a run: python -m ace_harness.audit_run <RUN_DIR> checks every cell from its sidecars.
+# Every job serves vLLM on port 8000, so chain the replicates instead of running them together
+# (pass every variable inline: sbatch exports the submitting shell's environment):
+#   C=$PWD/campaign_2024
+#   j1=$(OUT_ROOT=$C RUN_LABEL=run1 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
+#   j2=$(OUT_ROOT=$C RUN_LABEL=run2 FULL=1 EXTRAS=1 sbatch --parsable --dependency=afterany:${j1%%;*} run_run1_refresh.sh)
+#   OUT_ROOT=$C RUN_LABEL=run3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:${j2%%;*} run_run1_refresh.sh
+# After a run: python -m ace_harness.audit_run $C/run1 [$C/run2 ...] checks every cell from its sidecars.
 
 set -euo pipefail
 
@@ -114,7 +120,8 @@ if [[ -f "${RUN_DIR}/RISK_TUNER" && "$(cat "${RUN_DIR}/RISK_TUNER")" != "$RISK_T
 fi
 echo "$RISK_TUNER" > "${RUN_DIR}/RISK_TUNER"
 export RISK_TUNER
-RUN_CONFIG="start=${START_DATE} end=${END_DATE} model=${MODEL} max_tokens=${MAX_TOKENS} capital=${INITIAL_CAPITAL} rebalance_days=${REBALANCE_DAYS}"
+COMMIT="$(git rev-parse HEAD)"
+RUN_CONFIG="start=${START_DATE} end=${END_DATE} model=${MODEL} max_tokens=${MAX_TOKENS} capital=${INITIAL_CAPITAL} rebalance_days=${REBALANCE_DAYS} commit=${COMMIT}"
 if [[ -f "${RUN_DIR}/RUN_CONFIG" && "$(cat "${RUN_DIR}/RUN_CONFIG")" != "$RUN_CONFIG" ]]; then
     echo "ERROR: ${RUN_DIR} was started with '$(cat "${RUN_DIR}/RUN_CONFIG")', not '${RUN_CONFIG}';" \
          "use a new OUT_ROOT/RUN_LABEL" >&2
@@ -130,7 +137,6 @@ if [[ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=all)
          "(diff saved to ${RUN_DIR}/git_diff_${JOB_ID}.patch)"
     DIRTY=1
 fi
-COMMIT="$(git rev-parse HEAD)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) job=${JOB_ID} commit=${COMMIT} risk_tuner=${RISK_TUNER}" \
     | tee -a "${RUN_DIR}/COMMIT"
 if [[ "$DIRTY" == "1" ]]; then
@@ -271,6 +277,9 @@ echo "vLLM online: ${SERVED}"
 for cell in "${CELLS[@]}"; do
     run_cell "${cell%%:*}" "${cell##*:}"
 done
+if compgen -G "${ACE_PRICE_CACHE}/*.pkl" >/dev/null; then  # the snapshot this run read; audit_run compares runs
+    (cd "$ACE_PRICE_CACHE" && sha256sum -- *.pkl) > "${RUN_DIR}/price_cache.sha256"
+fi
 
 # ── Table ────────────────────────────────────────────────────────────────────
 TITLE="$(echo "$RUN_LABEL" | sed -E 's/^run/RUN /')"

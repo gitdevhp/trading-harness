@@ -24,9 +24,12 @@ Per ace cell ({run}/{universe}/{system}) it reports what the SLURM log cannot:
             universe: the equal_weight fallback when no allocation parsed
   gov       ADAP / REMO / AUTOGOV / DEBATER+STOP: stop reasons, freeze modes, demand and
             how many decisions showed the Solver any memory
+  rmax      longest single Reflector reply (tokens), to compare with its budget
   mem       bullets in the final playbook
 plus provenance (status, git sha, git_dirty) and data_hash agreement within and
-across runs. Exit status 1 if anything is flagged.
+across runs. Across the runs given it also flags cells that ran on different
+commits, runs that requested different windows, and runs whose price snapshot
+files (the driver's price_cache.sha256) differ. Exit status 1 if anything is flagged.
 """
 import argparse
 import collections
@@ -116,19 +119,22 @@ def audit_cell(cell_dir):
     n_assets = len(man.get("tickers") or [])
 
     tok = _load_json(stem + "_tokens.json") if os.path.exists(stem + "_tokens.json") else {}
-    refl = {"calls": 0, "tasks": 0, "at_cap": 0, "multi_call_tasks": 0, "unparsed": 0}
+    refl = {"calls": 0, "tasks": 0, "at_cap": 0, "multi_call_tasks": 0, "unparsed": 0, "max_completion": 0}
     cur = {"calls": 0, "single_call_tasks": 0, "at_cap": 0}
-    truncated = collections.Counter()  # per role, from llm_client's finish_reason count
+    truncated, unparsed = collections.Counter(), collections.Counter()  # per role, counted by llm_client
     counted = "truncated" in (tok.get("totals") or {})
     for task in tok.get("per_task") or []:
         roles = task.get("by_role") or {}
         for role, counts in roles.items():
             truncated[role] += counts.get("truncated") or 0
+            unparsed[role] += counts.get("unparsed") or 0
         r = roles.get("reflector")
         if r and r.get("calls"):
             refl["calls"] += r["calls"]
             refl["tasks"] += 1
             refl["unparsed"] += r.get("unparsed") or 0
+            if r["calls"] == 1:
+                refl["max_completion"] = max(refl["max_completion"], r.get("completion") or 0)
             if counted:
                 refl["at_cap"] += r.get("truncated") or 0
             elif r["calls"] == 1:
@@ -144,7 +150,8 @@ def audit_cell(cell_dir):
                 cur["single_call_tasks"] += 1
                 cur["at_cap"] += (c.get("completion") or 0) >= CURATOR_CAP
     out.update(reflector=refl, curator=cur, totals=tok.get("totals"), truncation_counted=counted,
-               truncated={k: v for k, v in truncated.items() if v})
+               truncated={k: v for k, v in truncated.items() if v}, unparsed={k: v for k, v in unparsed.items() if v},
+               budgets=man.get("output_budgets") or {})
 
     decisions = []
     if os.path.exists(stem + "_decisions.jsonl"):
@@ -196,15 +203,15 @@ def audit_cell(cell_dir):
     if out["status"] != "complete":
         out["flags"].append(f"manifest status {out['status']!r}")
     if refl["at_cap"]:
-        out["flags"].append(f"{refl['at_cap']}/{refl['calls']} Reflector replies stopped at the output cap "
-                            "(cut off: lessons and bullet checks dropped)")
-    if refl["unparsed"]:
-        out["flags"].append(f"{refl['unparsed']}/{refl['calls']} Reflector replies did not parse (dropped)")
+        out["flags"].append(f"{refl['at_cap']}/{refl['calls']} Reflector replies stopped at the output cap"
+                            + (" (cut off)" if counted else " (cut off: lessons and bullet checks dropped)"))
     if cur["at_cap"]:
         of = cur["calls"] if counted else cur["single_call_tasks"]
-        out["flags"].append(f"{cur['at_cap']}/{of} Curator replies stopped at the output cap")
+        out["flags"].append(f"{cur['at_cap']}/{of} Curator replies stopped at the output cap (cut off)")
     for role in sorted(set(out["truncated"]) - {"reflector", "consolidator"}):
-        out["flags"].append(f"{out['truncated'][role]} {role} replies stopped at max_tokens")
+        out["flags"].append(f"{out['truncated'][role]} {role} replies stopped at max_tokens (cut off)")
+    for role in sorted(out["unparsed"]):
+        out["flags"].append(f"{out['unparsed'][role]} {role} replies did not parse (their content was dropped)")
     if critic["parse_fail"]:
         out["flags"].append(f"{critic['parse_fail']}/{critic['reviews']} critic replies did not parse "
                             f"({critic['parse_fail_read_as_accept']} read as accept)")
@@ -243,6 +250,15 @@ def _check_windows(cells):
     return start, end
 
 
+def _snapshot(root):
+    """{file: sha256} of the price snapshot the run read (the driver's price_cache.sha256)."""
+    path = os.path.join(root, "price_cache.sha256")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        return {parts[-1].lstrip("*"): parts[0] for parts in (line.split() for line in f) if len(parts) >= 2}
+
+
 def audit_run(root):
     cells = []
     present = sorted(d for d in glob.glob(os.path.join(root, "*", "*")) if os.path.isdir(d))
@@ -251,7 +267,31 @@ def audit_run(root):
     for cell_dir in present:
         cells.append(audit_cell(cell_dir))
     window = _check_windows(cells)
-    return {"root": root, "window": window, "cells": cells}
+    return {"root": root, "window": window, "cells": cells, "snapshot": _snapshot(root)}
+
+
+def _campaign_flags(runs):
+    """Replicates must share one commit, one requested window and one price snapshot."""
+    flags = []
+    shas = collections.defaultdict(list)
+    for run in runs:
+        for c in run["cells"]:
+            if c.get("git_sha"):
+                shas[c["git_sha"][:7]].append(f"{run['root']}/{c['cell']}")
+    if len(shas) > 1:
+        flags.append("cells ran on different commits: " +
+                     "; ".join(f"{sha} ({len(cells)} cells, e.g. {cells[0]})" for sha, cells in sorted(shas.items())))
+    windows = {run["root"]: run["window"] for run in runs if run["window"]}
+    if len(set(windows.values())) > 1:
+        flags.append(f"runs requested different windows: {windows}")
+    snaps = [(run["root"], run["snapshot"]) for run in runs if run.get("snapshot")]
+    for root, snap in snaps[1:]:
+        base_root, base = snaps[0]
+        changed = sorted(f for f in set(base) & set(snap) if base[f] != snap[f])
+        if changed:
+            flags.append(f"{root} read different price files than {base_root}: {changed[:5]}"
+                         + (f" (+{len(changed) - 5} more)" if len(changed) > 5 else ""))
+    return flags
 
 
 def _hash_report(runs):
@@ -288,7 +328,7 @@ def render(runs):
         window = "..".join(run["window"]) if run["window"] else "?"
         lines.append(f"AUDIT {run['root']}  ({len(cells)} cells, requested {window})")
         lines.append(f"{'cell':<24} {'status':<9} {'sha':<8} {'dirty':<6} {'days':>4} {'tasks':>5} "
-                     f"{'refl':>4} {'@cap':>4} {'cur':>4} {'@cap':>4} {'reviews':>7} {'accept':>6} "
+                     f"{'refl':>4} {'@cap':>4} {'rmax':>5} {'cur':>4} {'@cap':>4} {'reviews':>7} {'accept':>6} "
                      f"{'pfail':>5} {'eqw':>4} {'mem':>4}")
         for c in cells:
             if c.get("kind") != "ace":
@@ -298,7 +338,8 @@ def render(runs):
             r, cu, cr, so = c["reflector"], c["curator"], c["critic"], c["solver"]
             lines.append(f"{c['cell']:<24} {str(c['status']):<9} {(c['git_sha'] or '-')[:7]:<8} "
                          f"{str(c['git_dirty']):<6} {c['days']:>4} {c['tasks']:>5} {r['calls']:>4} "
-                         f"{r['at_cap']:>4} {cu['calls']:>4} {cu['at_cap']:>4} {cr['reviews']:>7} "
+                         f"{r['at_cap']:>4} {r['max_completion'] or '-':>5} {cu['calls']:>4} {cu['at_cap']:>4} "
+                         f"{cr['reviews']:>7} "
                          f"{cr['accept']:>6} {cr['parse_fail']:>5} {so['equal_weight']:>4} "
                          f"{c['memory_size'] if c['memory_size'] is not None else '-':>4}")
         gov_cells = [c for c in cells if c.get("gov")]
@@ -322,7 +363,14 @@ def render(runs):
     hash_lines = _hash_report(runs)
     lines.append("data_hash: " + ("identical within every universe" if not hash_lines else "see below"))
     lines.extend(hash_lines)
+    budgets = sorted({json.dumps(c["budgets"], sort_keys=True) for run in runs for c in run["cells"] if c.get("budgets")})
+    if budgets:
+        lines.append("output budgets (tokens): " + " | ".join(budgets))
+    snaps = [run for run in runs if run.get("snapshot")]
+    if snaps:
+        lines.append("price snapshot: " + ", ".join(f"{run['root']} {len(run['snapshot'])} files" for run in snaps))
     flags = [f"{run['root']}/{c['cell']}: {flag}" for run in runs for c in run["cells"] for flag in c["flags"]]
+    flags += _campaign_flags(runs)
     dirty = sorted({run["root"] for run in runs for c in run["cells"] if c.get("git_dirty")})
     lines.append("")
     lines.append("FLAGS" + ("" if flags or dirty else ": none"))

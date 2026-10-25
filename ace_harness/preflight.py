@@ -12,12 +12,19 @@ Exits 1 if any ticker would break or shorten the run:
   * fewer than 200 rows before the start (the screener's 200-day SMA).
 It also prints each universe's common trading days and every one-day move above
 15% inside the window (an unadjusted split or spin-off shows up there).
+
+With ACE_PRICE_CACHE set to a campaign's OUT_ROOT/price_cache it checks, and
+stores, the exact frames the ace cells of that campaign will then read:
+    ACE_PRICE_CACHE=$PWD/campaign_2024/price_cache python -m ace_harness.preflight 2024-01-01 2024-12-31
+If that reports PROBLEMS, the stored frames include the bad ones: delete that
+price_cache directory before submitting anything to the campaign.
 """
 import argparse
 import sys
 
 import pandas as pd
 
+from ace_harness import price_cache
 from ace_harness.market import _download_ticker
 from ace_harness.universes import UNIVERSES
 
@@ -27,7 +34,12 @@ SLACK_DAYS = 6           # first/last trading day vs requested dates
 BIG_MOVE = 0.15
 
 
-def check(start, end, download=_download_ticker, universes=UNIVERSES):
+def _ace_download(ticker, start, end):
+    """What MarketUniverse.prefetch reads: the campaign snapshot when ACE_PRICE_CACHE is set."""
+    return price_cache.fetch("ace", ticker, start, end, lambda: _download_ticker(ticker, start, end))
+
+
+def check(start, end, download=_ace_download, universes=UNIVERSES):
     t0, t1 = pd.to_datetime(start), pd.to_datetime(end)
     lookback_start = (t0 - pd.Timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d")
     download_end = (t1 + pd.Timedelta(days=1)).strftime("%Y-%m-%d")

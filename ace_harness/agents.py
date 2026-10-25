@@ -30,12 +30,20 @@ from ace_harness.llm_client import chat, note_unparsed, SOLVER_MODEL, DEBATER_MO
 
 _VALID_CONFIDENCE = {"high", "medium", "low"}
 _MAX_LESSONS_PER_CALL = 5
-# Reflector output budget. The earlier 550 (800 when ADAP adds candidate lessons)
-# cut off 191 of 300 replies in RUN 1 once the memory held bullets to grade; a cut
+# Output budgets, sized from the largest reply each prompt asks for (never from
+# results). The Reflector's earlier 550 (800 when ADAP adds candidate lessons) cut
+# off 191 of 300 replies in RUN 1 once the memory held bullets to grade; a cut
 # reply's JSON does not parse, so its lessons and bullet checks were all dropped.
-# The budget only has to hold the requested JSON; llm_client counts any reply that
-# still stops at it (finish_reason "length") and agents counts unparsed replies.
-REFLECTOR_MAX_TOKENS = 2048
+# The Reflector is asked for <= 5 lessons, <= 5 candidate checks and a check of
+# every bullet it can verify (<= 50 shown + 10 probation, ~60 tokens each): ~4k.
+# The Curator is asked for <= 8 ops (~95 tokens each with merged wording): ~800,
+# which the old 800 cap left no room for. The Debater's reply (<= 5 lessons) fits
+# 600 with room to spare: all 1046 RUN 1 reviews parsed. At temperature 0 a larger
+# budget cannot change a reply that already fit. llm_client counts any reply that
+# still stops at its budget (finish_reason "length"); unparsed replies are counted.
+REFLECTOR_MAX_TOKENS = 4096
+CURATOR_MAX_TOKENS = 2048
+DEBATER_MAX_TOKENS = 600
 
 _LESSON_QUALITY_BAR = """A lesson must reference a SPECIFIC, checkable condition from the screener \
 (a named metric and a threshold — e.g. "6M-Mom < -10%", "price below 200d-SMA", "1M-Vol > 30%") paired \
@@ -421,7 +429,7 @@ Portfolio status:
 Proposed target allocations: {proposed_allocations}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=600)
+                      temperature=0.0, max_tokens=DEBATER_MAX_TOKENS)
         parsed = _extract_json(reply)
         raw_verdict = str(parsed.get("verdict", "")).strip().lower() if isinstance(parsed, dict) else ""
         parse_ok = raw_verdict in ("accept", "revise")
@@ -564,8 +572,11 @@ Respond ONLY with a JSON array of at most 8 ops, no other text."""
         user_prompt = f"Full existing playbook:\n{existing}\n\nNew candidate lessons:\n{json.dumps(lessons)}"
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=800)
-        return _extract_json_array(reply)[:8]
+                      temperature=0.0, max_tokens=CURATOR_MAX_TOKENS)
+        ops = _extract_json_array(reply)
+        if not ops and not re.search(r"\[\s*\]", reply):  # no array at all, or one that does not parse
+            note_unparsed("consolidator")
+        return ops[:8]
 
 
 class RiskTuner:
