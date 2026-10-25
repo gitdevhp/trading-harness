@@ -8,7 +8,10 @@ writes, or blocks exported from the sheet) into the paper's tables:
         [--out_dir OUT/summary]
 
 sd is the sample standard deviation across runs (n-1); it is blank with one run.
-Every input must contain the same (system, universe) cells.
+Every input must contain the same (system, universe) cells. A run made with
+FULL=0 has QWEN/REACT/HARNESS only in sp30 and diversified40: complete it by
+re-submitting run_run1_refresh.sh with the same OUT_ROOT and RUN_LABEL plus
+FULL=1 (finished cells are skipped, only the missing ones run).
 """
 import argparse
 import os
@@ -52,9 +55,14 @@ def summarize(tables):
     keys = set(tables[0])
     for t in tables[1:]:
         if set(t) != keys:
-            raise ValueError(f"runs disagree on cells: {sorted(keys ^ set(t))}")
+            raise ValueError(f"runs disagree on cells: {sorted(keys ^ set(t))}; complete the smaller run with "
+                             "FULL=1 (same OUT_ROOT and RUN_LABEL; finished cells are skipped)")
     order = [label for _, label in SYSTEMS]
     systems = [s for s in order if any(k[0] == s for k in keys)]
+    coverage = {s: sum(k[0] == s for k in keys) for s in systems}
+    if len(set(coverage.values())) > 1:
+        print(f"WARNING: systems cover different numbers of universes {coverage}; cross-universe means "
+              "are only comparable between systems with the same count", file=sys.stderr)
 
     per_universe = [["System", "Universe", "n_runs"] + [f"{m} mean" for m in METRICS] + [f"{m} sd" for m in METRICS]]
     for system in systems:

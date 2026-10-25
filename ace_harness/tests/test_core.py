@@ -69,9 +69,18 @@ class FakeOpenAI:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
 
 
-def with_real_chat(stub):
+class CappedFakeOpenAI(FakeOpenAI):
+    """FakeOpenAI that stops a reply at max_tokens, as vLLM does: the text is
+    cut and completion_tokens equals max_tokens exactly."""
+
+    def __init__(self, reply_fn):
+        super().__init__(lambda model, messages, max_tokens, **kw:
+                         reply_fn(model, messages, max_tokens=max_tokens, **kw)[:max_tokens * 4])
+
+
+def with_real_chat(stub, client=FakeOpenAI):
     """Context manager: route agents.chat through the real llm_client.chat
-    backed by FakeOpenAI(stub), so token accounting is exercised."""
+    backed by client(stub), so token accounting is exercised."""
     import contextlib
     import ace_harness.agents as agents_mod
     import ace_harness.llm_client as llm
@@ -79,7 +88,7 @@ def with_real_chat(stub):
     @contextlib.contextmanager
     def cm():
         saved = (agents_mod.chat, llm._client)
-        llm._client = FakeOpenAI(stub)
+        llm._client = client(stub)
         agents_mod.chat = getattr(llm, "_unpatched_chat", llm.chat)
         llm.reset_token_counts()
         try:
@@ -223,6 +232,136 @@ def test_make_table_base_blocks_and_expect():
     print("[make_table] reads only the first block of a multi-run sheet; missing expected cells raise")
 
 
+def test_audit_run():
+    """audit_run finds what the SLURM log cannot show: Reflector replies cut
+    off at their output cap (and the Curator calls that therefore never
+    happen), unparseable or oddly cased critic verdicts, a cell whose
+    backtest is shorter than requested, and data_hash drift across runs."""
+    import inspect
+    import shutil
+    import ace_harness.agents as agents_mod
+    from ace_harness import audit_run, make_table, run_monthly
+
+    src = inspect.getsource(agents_mod)
+    assert "max_tokens=800 if (candidates or probation_text) else 550" in src and audit_run.REFLECTOR_CAPS == (550, 800)
+    assert "temperature=0.0, max_tokens=800)\n        return _extract_json_array" in src and audit_run.CURATOR_CAP == 800
+    assert list(audit_run.UNIVERSES) == make_table.UNIVERSES
+    assert list(audit_run.SYSTEMS) == [s for s, _ in make_table.SYSTEMS]
+    assert "ace_harness" not in "".join(l for l in inspect.getsource(audit_run).splitlines(True)
+                                        if l.startswith(("import", "from"))), "audit_run must stay stdlib-only"
+    assert audit_run._is_equal_weight({"A": 50.0, "B": 50.0, "CASH": 0.0}, 2)
+    assert not audit_run._is_equal_weight({"A": 50.0, "B": 50.0, "CASH": 0.0}, 3)
+    assert not audit_run._is_equal_weight({"A": 45.0, "B": 45.0, "CASH": 10.0}, 2)
+    from ace_harness.memory import ExperienceMemory
+    m = ExperienceMemory()
+    m.add_bullet("RISK LESSONS", "Cap at 5% when 1M-Vol > 30%")
+    m.add_bullet("CONVICTION SIGNALS", "Size up when 6M-Mom > 20%")
+    with tempfile.TemporaryDirectory() as tmp:
+        m.save(os.path.join(tmp, "pb.txt"))
+        with open(os.path.join(tmp, "pb.txt")) as f:
+            assert sum(bool(audit_run._BULLET_RE.match(line)) for line in f) == 2, "playbook bullet count"
+
+    u = gu.make_universe()
+    base_stub = gu.HashChat(u.anon_universe)
+
+    def long_reflector(model, messages, **kw):  # a Reflector reply longer than its 550-token cap
+        text = base_stub(model, messages, **kw)
+        if messages[0]["content"].startswith("You are a portfolio Reflector"):
+            out = json.loads(text)
+            out["lessons"] = [{"lesson": "When 1M-Vol > 30% cut to 4% " + "x" * 3000, "confidence": "high"}]
+            return json.dumps(out)
+        return text
+
+    def odd_critic(bits, system):  # half the replies have no JSON, half say "Accept"
+        return "no json here" if bits % 2 else {"verdict": "Accept", "feedback": "fine", "lessons": []}
+
+    saved = run_monthly.build_universe
+    run_monthly.build_universe = lambda tickers, start, end: gu.make_universe()
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            run1 = os.path.join(tmp, "run1")
+            def cell(system):
+                path = os.path.join(run1, "tech18", system)
+                os.makedirs(path, exist_ok=True)
+                return path
+            with with_real_chat(long_reflector, client=CappedFakeOpenAI):
+                run_monthly.run_system("memory_only", list("ABCDE"), "2024-01-02", "2024-12-31", cell("memory"),
+                                       adaptive_risk=False)
+                run_monthly.run_system("adap_v2", list("ABCDE"), "2024-01-02", "2024-12-31", cell("adap"),
+                                       adaptive_risk=False)
+            with with_real_chat(gu.HashChat(u.anon_universe, debater_override=odd_critic)):
+                run_monthly.run_system("intra", list("ABCDE"), "2024-01-02", "2024-12-31", cell("debater"))
+            with open(os.path.join(cell("qwen"), "qwen_results_raw.json"), "w") as f:
+                json.dump({"daily_nav": [{"date": "2024-01-02", "portfolio_value": 1.0},
+                                         {"date": "2024-06-28", "portfolio_value": 1.1}]}, f)
+            with open(os.path.join(cell("qwen"), "PROVENANCE"), "w") as f:
+                f.write("commit=abc123 script=qwen_port.py model=m date=2026-10-25T00:00:00Z\n")
+
+            run = audit_run.audit_run(run1)
+            by = {c["system"]: c for c in run["cells"]}
+            assert [c["system"] for c in run["cells"]] == ["qwen", "memory", "debater", "adap"], "table order"
+            assert run["window"] == ("2024-01-02", "2024-12-31")
+            mem = by["memory"]
+            assert mem["status"] == "complete" and mem["tasks"] == 11
+            assert mem["reflector"]["calls"] == mem["reflector"]["at_cap"] == 10, "every cut-off reply found"
+            assert mem["curator"]["calls"] == 0, "no lessons survive, so the Curator never runs"
+            assert mem["memory_size"] == 0 and any("Reflector replies stopped" in f for f in mem["flags"])
+            deb = by["debater"]
+            assert deb["critic"]["parse_fail"] == deb["critic"]["parse_fail_read_as_accept"] > 0
+            assert deb["critic"]["verdicts"]["Accept"] > 0 and deb["critic"]["accept"] == 0
+            assert any("Accept" in f for f in deb["flags"]) and any("did not parse" in f for f in deb["flags"])
+            adap = by["adap"]
+            assert adap["gov"]["tasks"] == 11 and sum(adap["gov"]["stops"].values()) == 11
+            assert any("covers 2024-01-02..2024-06-28" in f for f in by["qwen"]["flags"])
+            assert by["qwen"]["git_sha"] == "abc123" and by["qwen"]["kind"] == "react"
+
+            run2 = os.path.join(tmp, "run2")
+            shutil.copytree(run1, run2)
+            man_path = glob_one(os.path.join(run2, "tech18", "debater", "*_manifest.json"))
+            man = json.load(open(man_path))
+            man["data_hash"] = "f" * 64
+            json.dump(man, open(man_path, "w"))
+            text, flagged = audit_run.render([run, audit_run.audit_run(run2)])
+            assert flagged and "FLAGS\n" in text and "Reflector replies stopped" in text
+            assert "DIFFERS within the run" in text and "differs across runs" in text
+    finally:
+        run_monthly.build_universe = saved
+    print("[audit_run] cut-off Reflector replies, skipped Curator calls, odd/unparsed verdicts, short "
+          "windows and data_hash drift are all flagged")
+
+
+def test_preflight():
+    import pandas as pd
+    from ace_harness import preflight
+    days = pd.bdate_range("2024-01-02", "2025-12-31")
+
+    def fake_download(ticker, start, end):
+        assert (start, end) == ("2024-01-02", "2026-01-01"), "365-day lookback, end inclusive"
+        if ticker == "BAD":
+            raise ValueError("no data")
+        idx = days[days < "2025-07-16"] if ticker == "SHORT" else days
+        close = pd.Series(100.0, index=idx)
+        if ticker == "JUMP":
+            close[idx >= "2025-03-03"] = 50.0
+        return pd.DataFrame({"Close": close})
+
+    lines, problems = preflight.check("2025-01-01", "2025-12-31", download=fake_download,
+                                      universes={"u1": ["OK", "JUMP"], "u2": ["OK", "SHORT"], "u3": ["BAD"]})
+    text = "\n".join(lines)
+    assert any(p.startswith("SHORT: ends 2025-07-15") for p in problems)
+    assert any(p.startswith("BAD: download failed") for p in problems) and len(problems) == 2
+    assert "('2025-03-03', -50.0)" in text and "u2             common trading days=140 2025-01-01..2025-07-15" in text
+    assert "u3             missing ['BAD']" in text
+    print("[preflight] failed downloads, short tickers and big one-day moves are reported")
+
+
+def glob_one(pattern):
+    import glob
+    matches = glob.glob(pattern)
+    assert len(matches) == 1, (pattern, matches)
+    return matches[0]
+
+
 
 
 
@@ -256,6 +395,8 @@ def run_all():
     test_make_table_merges_new_cells_into_base()
     test_make_table_base_blocks_and_expect()
     test_summarize_runs()
+    test_audit_run()
+    test_preflight()
     print("CORE TESTS PASSED")
 
 

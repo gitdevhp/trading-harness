@@ -33,7 +33,10 @@
 #                       A RUN_DIR started with one setting refuses to resume with the other.
 #   REUSE_DEBATER=1     do not re-run DEBATER in the 4 small universes — only if job
 #                       1706716 ran on a checkout that already contained b2c9a69.
-#   FULL=1              re-run all 42 cells from this commit (maximum consistency).
+#   FULL=1              all 42 cells, i.e. QWEN/REACT/HARNESS in every universe as well. Replicates
+#                       use FULL=1, and summarize_runs needs every run to hold the same cells, so
+#                       complete a FULL=0 run by re-submitting it with the same OUT_ROOT and
+#                       RUN_LABEL plus FULL=1 (finished cells are skipped; only the rest run).
 #   EXTRAS=1            also run the rows that tie the extension to the peer's paper:
 #                       REMO (faithful ReMo Alg. 1), AUTOGOV (faithful AutoGovern Alg. 2;
 #                       ADAP = AUTOGOV + outcome grounding) and DEBATER+STOP (ADAP's stops
@@ -44,7 +47,14 @@
 #   BASE_TSV=path       your current RUN 1 table (TSV, same columns): the printed
 #                       table merges the new cells into it.
 #   OUT_ROOT=dir        default ${ROOT_DIR}/run1_refresh_<jobid>; re-submit with the same
-#                       OUT_ROOT to resume (finished cells are skipped).
+#                       OUT_ROOT to resume (finished cells are skipped). A RUN_DIR remembers its
+#                       dates, model and budgets (RUN_CONFIG) and refuses to resume with others.
+#
+# Submit from the repo root (SLURM writes log/run1_refresh_<jobid>.out there; log/ must exist).
+# Every job serves vLLM on port 8000, so chain several runs instead of running them together:
+#   j=$(OUT_ROOT=$PWD/refresh_2024 RUN_LABEL=run2 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
+#   OUT_ROOT=$PWD/refresh_2024 RUN_LABEL=run3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:$j run_run1_refresh.sh
+# After a run: python -m ace_harness.audit_run <RUN_DIR> checks every cell from its sidecars.
 
 set -euo pipefail
 
@@ -102,13 +112,32 @@ if [[ -f "${RUN_DIR}/RISK_TUNER" && "$(cat "${RUN_DIR}/RISK_TUNER")" != "$RISK_T
 fi
 echo "$RISK_TUNER" > "${RUN_DIR}/RISK_TUNER"
 export RISK_TUNER
+RUN_CONFIG="start=${START_DATE} end=${END_DATE} model=${MODEL} max_tokens=${MAX_TOKENS} capital=${INITIAL_CAPITAL} rebalance_days=${REBALANCE_DAYS}"
+if [[ -f "${RUN_DIR}/RUN_CONFIG" && "$(cat "${RUN_DIR}/RUN_CONFIG")" != "$RUN_CONFIG" ]]; then
+    echo "ERROR: ${RUN_DIR} was started with '$(cat "${RUN_DIR}/RUN_CONFIG")', not '${RUN_CONFIG}';" \
+         "use a new OUT_ROOT/RUN_LABEL" >&2
+    exit 1
+fi
+echo "$RUN_CONFIG" > "${RUN_DIR}/RUN_CONFIG"
 
+DIRTY=0
 if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
-    echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true"
+    echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true" \
+         "(diff saved to ${RUN_DIR}/git_diff_${JOB_ID}.patch)"
+    DIRTY=1
 fi
 COMMIT="$(git rev-parse HEAD)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) job=${JOB_ID} commit=${COMMIT} risk_tuner=${RISK_TUNER}" \
     | tee -a "${RUN_DIR}/COMMIT"
+if [[ "$DIRTY" == "1" ]]; then
+    git diff HEAD > "${RUN_DIR}/git_diff_${JOB_ID}.patch"
+fi
+{   # software and weights this job ran with
+    echo "job=${JOB_ID} host=$(hostname) commit=${COMMIT}"
+    nvidia-smi -L 2>/dev/null || true
+    echo "model_snapshot=$(cat "${HF_HOME}/hub/models--${MODEL//\//--}/refs/main" 2>/dev/null || echo unknown)"
+    pip freeze 2>/dev/null | grep -iE '^(vllm|torch|transformers|openai|yfinance|pandas|numpy)==' || true
+} > "${RUN_DIR}/ENV_${JOB_ID}.txt"
 
 SMALL=(tech18 mag7 balanced15 volatile25)
 LARGE=(sp30 diversified40)
