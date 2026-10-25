@@ -69,13 +69,20 @@ class FakeOpenAI:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
 
 
-class CappedFakeOpenAI(FakeOpenAI):
+class CappedFakeOpenAI:
     """FakeOpenAI that stops a reply at max_tokens, as vLLM does: the text is
-    cut and completion_tokens equals max_tokens exactly."""
+    cut, completion_tokens equals max_tokens and finish_reason is "length"."""
 
     def __init__(self, reply_fn):
-        super().__init__(lambda model, messages, max_tokens, **kw:
-                         reply_fn(model, messages, max_tokens=max_tokens, **kw)[:max_tokens * 4])
+        def create(model, messages, temperature, max_tokens, stop):
+            text = reply_fn(model, messages, temperature=temperature, max_tokens=max_tokens, stop=stop)
+            finish = "stop"
+            if len(text) // 4 > max_tokens:
+                text, finish = text[:max_tokens * 4], "length"
+            p = sum(len(m["content"]) for m in messages) // 4
+            choice = types.SimpleNamespace(message=types.SimpleNamespace(content=text), finish_reason=finish)
+            return types.SimpleNamespace(usage=_Usage(p, len(text) // 4), choices=[choice])
+        self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
 
 
 def with_real_chat(stub, client=FakeOpenAI):
@@ -243,7 +250,7 @@ def test_audit_run():
     from ace_harness import audit_run, make_table, run_monthly
 
     src = inspect.getsource(agents_mod)
-    assert "max_tokens=800 if (candidates or probation_text) else 550" in src and audit_run.REFLECTOR_CAPS == (550, 800)
+    assert agents_mod.REFLECTOR_MAX_TOKENS == 2048 and "max_tokens=REFLECTOR_MAX_TOKENS)" in src
     assert "temperature=0.0, max_tokens=800)\n        return _extract_json_array" in src and audit_run.CURATOR_CAP == 800
     assert list(audit_run.UNIVERSES) == make_table.UNIVERSES
     assert list(audit_run.SYSTEMS) == [s for s, _ in make_table.SYSTEMS]
@@ -264,11 +271,11 @@ def test_audit_run():
     u = gu.make_universe()
     base_stub = gu.HashChat(u.anon_universe)
 
-    def long_reflector(model, messages, **kw):  # a Reflector reply longer than its 550-token cap
+    def long_reflector(model, messages, **kw):  # a Reflector reply longer than its output budget
         text = base_stub(model, messages, **kw)
         if messages[0]["content"].startswith("You are a portfolio Reflector"):
             out = json.loads(text)
-            out["lessons"] = [{"lesson": "When 1M-Vol > 30% cut to 4% " + "x" * 3000, "confidence": "high"}]
+            out["lessons"] = [{"lesson": "When 1M-Vol > 30% cut to 4% " + "x" * 9000, "confidence": "high"}]
             return json.dumps(out)
         return text
 
@@ -303,7 +310,9 @@ def test_audit_run():
             assert run["window"] == ("2024-01-02", "2024-12-31")
             mem = by["memory"]
             assert mem["status"] == "complete" and mem["tasks"] == 11
-            assert mem["reflector"]["calls"] == mem["reflector"]["at_cap"] == 10, "every cut-off reply found"
+            assert mem["reflector"]["calls"] == mem["reflector"]["at_cap"] == mem["reflector"]["unparsed"] == 10, \
+                "every cut-off (and therefore unparsed) reply is counted"
+            assert mem["truncation_counted"] and mem["truncated"] == {"reflector": 10}
             assert mem["curator"]["calls"] == 0, "no lessons survive, so the Curator never runs"
             assert mem["memory_size"] == 0 and any("Reflector replies stopped" in f for f in mem["flags"])
             deb = by["debater"]
@@ -317,6 +326,18 @@ def test_audit_run():
 
             run2 = os.path.join(tmp, "run2")
             shutil.copytree(run1, run2)
+            # a run from before the cut-off counters: fall back to completion == a known cap
+            tok_path = glob_one(os.path.join(run2, "tech18", "memory", "*_tokens.json"))
+            tok = json.load(open(tok_path))
+            tok["totals"].pop("truncated")
+            for task in tok["per_task"]:
+                for counts in task["by_role"].values():
+                    counts.pop("truncated"), counts.pop("unparsed")
+                if "reflector" in task["by_role"]:
+                    task["by_role"]["reflector"]["completion"] = 550
+            json.dump(tok, open(tok_path, "w"))
+            legacy = {c["system"]: c for c in audit_run.audit_run(run2)["cells"]}["memory"]
+            assert not legacy["truncation_counted"] and legacy["reflector"]["at_cap"] == 10
             man_path = glob_one(os.path.join(run2, "tech18", "debater", "*_manifest.json"))
             man = json.load(open(man_path))
             man["data_hash"] = "f" * 64
@@ -353,6 +374,70 @@ def test_preflight():
     assert "('2025-03-03', -50.0)" in text and "u2             common trading days=140 2025-01-01..2025-07-15" in text
     assert "u3             missing ['BAD']" in text
     print("[preflight] failed downloads, short tickers and big one-day moves are reported")
+
+
+def test_price_cache():
+    """With ACE_PRICE_CACHE set, the ACE engine and all three ReAct baselines
+    download each ticker once per campaign and every later cell reads the
+    identical frame; without it they download as before."""
+    import importlib.util
+    import pandas as pd
+    from ace_harness import accounting, market, price_cache
+
+    days = pd.bdate_range("2023-01-03", "2024-12-31")
+    calls = []
+
+    def fake_yf_download(ticker, start=None, end=None, **kw):
+        calls.append((ticker, start, end))
+        noise = len(calls) * 1e-5  # Yahoo's adjusted prices differ slightly on every request
+        close = pd.Series([100.0 + noise + i for i in range(len(days))], index=days)
+        return pd.DataFrame({"Open": close, "High": close, "Low": close, "Close": close, "Volume": 1.0})
+
+    saved_env, saved_yf = os.environ.get(price_cache.ENV), market.yf.download
+    market.yf.download = fake_yf_download
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            os.environ.pop(price_cache.ENV, None)
+            u1, u2 = market.MarketUniverse(["AAA", "BBB"]), market.MarketUniverse(["AAA", "BBB"])
+            u1.prefetch("2024-01-02", "2024-12-31")
+            u2.prefetch("2024-01-02", "2024-12-31")
+            assert len(calls) == 4 and accounting.data_hash(u1) != accounting.data_hash(u2), "no cache: as before"
+
+            os.environ[price_cache.ENV] = os.path.join(tmp, "price_cache")
+            calls.clear()
+            u1, u2 = market.MarketUniverse(["AAA", "BBB"]), market.MarketUniverse(["AAA", "BBB"])
+            u1.prefetch("2024-01-02", "2024-12-31")
+            u2.prefetch("2024-01-02", "2024-12-31")
+            assert len(calls) == 2 and accounting.data_hash(u1) == accounting.data_hash(u2), "one download, same data"
+            for anon in u1.anon_universe:
+                pd.testing.assert_frame_equal(u1.data_cache[anon], u2.data_cache[anon])
+
+            react_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "ReAct")
+            for script, start in (("qwen_port", "2024-01-02"), ("noharness", "2024-01-02"),
+                                  ("yesharnessgpt", "2023-01-02")):
+                frames = []
+                for _ in range(2):
+                    spec = importlib.util.spec_from_file_location(f"_react_{script}",
+                                                                  os.path.join(react_dir, f"{script}.py"))
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)
+                    mod.yf.download = fake_yf_download  # same yfinance module object as market.yf
+                    mod.setup_universe(["AAA", "BBB"])
+                    calls.clear()
+                    mod.prefetch_data("2024-01-02", "2024-12-31")
+                    frames.append((len(calls), dict(mod.GLOBAL_DATA_CACHE)))
+                (n_first, first), (n_second, second) = frames
+                assert n_second == 0 and set(first) == set(second), (script, n_first, n_second)
+                for anon in first:
+                    pd.testing.assert_frame_equal(first[anon], second[anon])
+                assert any(f.startswith(f"{script}__AAA__{start}__") for f in os.listdir(os.environ[price_cache.ENV]))
+    finally:
+        market.yf.download = saved_yf
+        if saved_env is None:
+            os.environ.pop(price_cache.ENV, None)
+        else:
+            os.environ[price_cache.ENV] = saved_env
+    print("[price_cache] ACE + QWEN/REACT/HARNESS download once per campaign; later cells read identical frames")
 
 
 def glob_one(pattern):
@@ -397,6 +482,7 @@ def run_all():
     test_summarize_runs()
     test_audit_run()
     test_preflight()
+    test_price_cache()
     print("CORE TESTS PASSED")
 
 

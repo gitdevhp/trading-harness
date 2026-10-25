@@ -96,7 +96,8 @@ def _versions():
 
 
 def build_manifest(output_file, system, args: dict, universe, extra=None) -> dict:
-    status = _git("status", "--porcelain", "--untracked-files=no")  # run outputs are untracked
+    # run outputs are untracked; nested repos (portbench) are not run code
+    status = _git("status", "--porcelain", "--untracked-files=no", "--ignore-submodules=all")
     manifest = {
         "status": "running",
         "system": system,
@@ -178,7 +179,8 @@ def prepare_memory(memory_path, init_from=None, evidence_path=None):
 
 
 def _usage_delta(before, after):
-    return {k: after.get(k, 0) - before.get(k, 0) for k in ("calls", "prompt", "completion", "total")}
+    return {k: after.get(k, 0) - before.get(k, 0)
+            for k in ("calls", "prompt", "completion", "total", "truncated", "unparsed")}
 
 
 def wrap_with_decision_log(decision_fn, log_path, universe, risk_harness=None):

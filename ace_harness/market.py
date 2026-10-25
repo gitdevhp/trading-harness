@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from ace_harness import price_cache
+
 os.environ.setdefault("YFINANCE_CACHE_DIR", "/tmp/yf_cache")
 yf.set_tz_cache_location("/tmp/yf_tz_cache")
 
@@ -124,7 +126,9 @@ class MarketUniverse:
         failures = []
         for ticker in self.raw_universe:
             try:
-                self.data_cache[self.anon_map[ticker]] = _download_ticker(ticker, lookback_start, download_end)
+                self.data_cache[self.anon_map[ticker]] = price_cache.fetch(
+                    "ace", ticker, lookback_start, download_end,
+                    lambda: _download_ticker(ticker, lookback_start, download_end))
             except Exception as exc:
                 failures.append(f"{ticker}: {exc}")
         if failures:

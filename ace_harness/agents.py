@@ -26,10 +26,16 @@ RiskTuner    = optional. Turns the same lessons into bounded numeric
 import json
 import re
 
-from ace_harness.llm_client import chat, SOLVER_MODEL, DEBATER_MODEL, CONSOLIDATOR_MODEL
+from ace_harness.llm_client import chat, note_unparsed, SOLVER_MODEL, DEBATER_MODEL, CONSOLIDATOR_MODEL
 
 _VALID_CONFIDENCE = {"high", "medium", "low"}
 _MAX_LESSONS_PER_CALL = 5
+# Reflector output budget. The earlier 550 (800 when ADAP adds candidate lessons)
+# cut off 191 of 300 replies in RUN 1 once the memory held bullets to grade; a cut
+# reply's JSON does not parse, so its lessons and bullet checks were all dropped.
+# The budget only has to hold the requested JSON; llm_client counts any reply that
+# still stops at it (finish_reason "length") and agents counts unparsed replies.
+REFLECTOR_MAX_TOKENS = 2048
 
 _LESSON_QUALITY_BAR = """A lesson must reference a SPECIFIC, checkable condition from the screener \
 (a named metric and a threshold — e.g. "6M-Mom < -10%", "price below 200d-SMA", "1M-Vol > 30%") paired \
@@ -509,9 +515,11 @@ Respond ONLY with JSON, no other text:
 Realized per-asset returns to {next_date} (%): {realized_return_pct}"""
 
         reply = chat(self.model, [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
-                      temperature=0.0, max_tokens=800 if (candidates or probation_text) else 550)
+                      temperature=0.0, max_tokens=REFLECTOR_MAX_TOKENS)
         parsed = _extract_json(reply)
         parse_ok = isinstance(parsed, dict)
+        if not parse_ok:
+            note_unparsed("reflector")
         parsed = parsed if parse_ok else {}
         return {
             "lessons": _normalize_lessons(parsed.get("lessons")),

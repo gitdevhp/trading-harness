@@ -7,13 +7,16 @@ checkout a job is using:  python ~/audit_run.py refresh_2024/run1
 
 Per ace cell ({run}/{universe}/{system}) it reports what the SLURM log cannot:
   days      backtest days covered, checked against the requested window
-  refl      Reflector calls and how many stopped at their output cap (550 tokens, 800 when
-            ADAP adds candidates/probation). vLLM stops at exactly max_tokens, so such a
-            reply is cut off, its JSON does not parse and its lessons and bullet checks are
-            dropped without any message.
+  refl      Reflector calls and how many stopped at their output cap. Such a reply is cut
+            off, its JSON does not parse and its lessons and bullet checks are dropped
+            without any message. Runs since the Reflector budget fix count cut-off replies
+            directly (finish_reason "length") and unparsed ones; for older runs a reply
+            whose completion equals a known cap (550/800) is counted, since vLLM stops at
+            exactly max_tokens.
   cur       Curator calls; the Curator is skipped when the Reflector returned no lessons,
-            so "cur < refl" counts slow loops that added nothing. cur@cap: single-call
-            tasks whose Curator reply stopped at its cap (800).
+            so "cur < refl" counts slow loops that added nothing. cur@cap: Curator replies
+            that stopped at their cap (800; older runs: single-call tasks only).
+            Cut-off replies of any other role (Solver, Debater) are flagged too.
   critic    reviews, literal "accept" verdicts, replies that did not parse (the legacy
             loops read a reply without a verdict as "accept"), and any verdict string
             other than accept/revise
@@ -34,8 +37,8 @@ import re
 import sys
 from datetime import date
 
-# Output caps in agents.py (Debater.post_task_reflect, Consolidator.consolidate);
-# tests/test_core.py checks they still match.
+# Output caps for runs made before llm_client counted cut-off replies (finish_reason
+# "length"): the Reflector's caps up to RUN 1 and the Curator's (agents.Consolidator).
 REFLECTOR_CAPS = (550, 800)
 CURATOR_CAP = 800
 # make_table's order; tests/test_core.py checks they still match.
@@ -113,25 +116,35 @@ def audit_cell(cell_dir):
     n_assets = len(man.get("tickers") or [])
 
     tok = _load_json(stem + "_tokens.json") if os.path.exists(stem + "_tokens.json") else {}
-    refl = {"calls": 0, "tasks": 0, "at_cap": 0, "multi_call_tasks": 0}
+    refl = {"calls": 0, "tasks": 0, "at_cap": 0, "multi_call_tasks": 0, "unparsed": 0}
     cur = {"calls": 0, "single_call_tasks": 0, "at_cap": 0}
+    truncated = collections.Counter()  # per role, from llm_client's finish_reason count
+    counted = "truncated" in (tok.get("totals") or {})
     for task in tok.get("per_task") or []:
         roles = task.get("by_role") or {}
+        for role, counts in roles.items():
+            truncated[role] += counts.get("truncated") or 0
         r = roles.get("reflector")
         if r and r.get("calls"):
             refl["calls"] += r["calls"]
             refl["tasks"] += 1
-            if r["calls"] == 1:
+            refl["unparsed"] += r.get("unparsed") or 0
+            if counted:
+                refl["at_cap"] += r.get("truncated") or 0
+            elif r["calls"] == 1:
                 refl["at_cap"] += r.get("completion") in REFLECTOR_CAPS
             else:
                 refl["multi_call_tasks"] += 1
         c = roles.get("consolidator")
         if c and c.get("calls"):
             cur["calls"] += c["calls"]
-            if c["calls"] == 1:
+            if counted:
+                cur["at_cap"] += c.get("truncated") or 0
+            elif c["calls"] == 1:
                 cur["single_call_tasks"] += 1
                 cur["at_cap"] += (c.get("completion") or 0) >= CURATOR_CAP
-    out.update(reflector=refl, curator=cur, totals=tok.get("totals"))
+    out.update(reflector=refl, curator=cur, totals=tok.get("totals"), truncation_counted=counted,
+               truncated={k: v for k, v in truncated.items() if v})
 
     decisions = []
     if os.path.exists(stem + "_decisions.jsonl"):
@@ -185,9 +198,13 @@ def audit_cell(cell_dir):
     if refl["at_cap"]:
         out["flags"].append(f"{refl['at_cap']}/{refl['calls']} Reflector replies stopped at the output cap "
                             "(cut off: lessons and bullet checks dropped)")
+    if refl["unparsed"]:
+        out["flags"].append(f"{refl['unparsed']}/{refl['calls']} Reflector replies did not parse (dropped)")
     if cur["at_cap"]:
-        out["flags"].append(f"{cur['at_cap']}/{cur['single_call_tasks']} single-call Curator replies stopped "
-                            "at the output cap")
+        of = cur["calls"] if counted else cur["single_call_tasks"]
+        out["flags"].append(f"{cur['at_cap']}/{of} Curator replies stopped at the output cap")
+    for role in sorted(set(out["truncated"]) - {"reflector", "consolidator"}):
+        out["flags"].append(f"{out['truncated'][role]} {role} replies stopped at max_tokens")
     if critic["parse_fail"]:
         out["flags"].append(f"{critic['parse_fail']}/{critic['reviews']} critic replies did not parse "
                             f"({critic['parse_fail_read_as_accept']} read as accept)")

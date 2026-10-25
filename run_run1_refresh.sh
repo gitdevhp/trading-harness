@@ -49,6 +49,8 @@
 #   OUT_ROOT=dir        default ${ROOT_DIR}/run1_refresh_<jobid>; re-submit with the same
 #                       OUT_ROOT to resume (finished cells are skipped). A RUN_DIR remembers its
 #                       dates, model and budgets (RUN_CONFIG) and refuses to resume with others.
+#                       Prices are downloaded once into OUT_ROOT/price_cache and reused by every
+#                       cell and replicate under that OUT_ROOT, so all of them read identical data.
 #
 # Submit from the repo root (SLURM writes log/run1_refresh_<jobid>.out there; log/ must exist).
 # Every job serves vLLM on port 8000, so chain several runs instead of running them together:
@@ -119,9 +121,11 @@ if [[ -f "${RUN_DIR}/RUN_CONFIG" && "$(cat "${RUN_DIR}/RUN_CONFIG")" != "$RUN_CO
     exit 1
 fi
 echo "$RUN_CONFIG" > "${RUN_DIR}/RUN_CONFIG"
+# one price snapshot per OUT_ROOT: every cell and replicate reads identical data (ace_harness/price_cache.py)
+export ACE_PRICE_CACHE="${OUT_ROOT}/price_cache"
 
 DIRTY=0
-if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+if [[ -n "$(git status --porcelain --untracked-files=no --ignore-submodules=all)" ]]; then  # nested repos are not run code
     echo "WARNING: working tree has uncommitted changes; manifests will record git_dirty=true" \
          "(diff saved to ${RUN_DIR}/git_diff_${JOB_ID}.patch)"
     DIRTY=1
@@ -130,7 +134,7 @@ COMMIT="$(git rev-parse HEAD)"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) job=${JOB_ID} commit=${COMMIT} risk_tuner=${RISK_TUNER}" \
     | tee -a "${RUN_DIR}/COMMIT"
 if [[ "$DIRTY" == "1" ]]; then
-    git diff HEAD > "${RUN_DIR}/git_diff_${JOB_ID}.patch"
+    git diff HEAD --ignore-submodules=all > "${RUN_DIR}/git_diff_${JOB_ID}.patch"
 fi
 {   # software and weights this job ran with
     echo "job=${JOB_ID} host=$(hostname) commit=${COMMIT}"
@@ -237,7 +241,7 @@ run_cell() {
 echo "=========================================="
 echo "RUN 1 REFRESH  (${RUN_LABEL})"
 echo "Model: ${MODEL}  temperature 0.0  |  RiskTuner: ${RISK_TUNER}  |  FULL=${FULL}  EXTRAS=${EXTRAS}"
-echo "Period: ${START_DATE} -> ${END_DATE}  |  Output: ${RUN_DIR}"
+echo "Period: ${START_DATE} -> ${END_DATE}  |  Output: ${RUN_DIR}  |  Prices: ${ACE_PRICE_CACHE}"
 echo "Cells (${#CELLS[@]}): ${CELLS[*]}"
 echo "=========================================="
 
