@@ -264,9 +264,17 @@ echo "Asset order: $([[ "$LABEL_SEED" == "0" ]] && echo canonical || echo "shuff
 echo "=========================================="
 
 # ── vLLM (same server flags as the original runs) ────────────────────────────
-# A chained job often lands on the GPU the previous job just released; its port and its
-# memory can take a minute or two to free, and vLLM refuses to start while more than 10%
-# of the GPU is in use. Wait for both and retry a failed start before giving up.
+# Serve the weights already in HF_HOME without contacting the Hugging Face Hub: its
+# unauthenticated API rate-limits the cluster's shared IP (HTTP 429 killed three campaign
+# jobs at startup), and offline mode also pins the snapshot every run uses (ENV_<job>.txt).
+if [[ -d "${HF_HOME}/hub/models--${MODEL//\//--}/snapshots" ]]; then
+    export HF_HUB_OFFLINE=1
+    echo "Model: cached snapshot, HF_HUB_OFFLINE=1"
+else
+    echo "WARNING: ${MODEL} is not in ${HF_HOME}; vLLM will download it from the Hugging Face Hub"
+fi
+# A chained job can also land on a GPU or port the previous job is still releasing:
+# wait for both, and retry a failed start before giving up.
 wait_for_port() {
     local i
     for i in $(seq 1 40); do
