@@ -359,6 +359,17 @@ def test_audit_run():
             assert "cells ran on different commits" in text and "0123456" in text
             assert "read different price files than" in text and "ace__BBB__2023-01-01__2025-01-01.pkl" in text
             assert "ace__AAA" not in text.split("read different price files")[1].split("\n")[0]
+            # a shuffled asset order renames the anonymous labels, so data_hash is only compared
+            # between runs with the same LABEL_SEED; the snapshot files cover the rest
+            run3 = os.path.join(tmp, "run3")
+            shutil.copytree(run2, run3)
+            with open(os.path.join(run3, "RUN_CONFIG"), "w") as f:
+                f.write("start=2024-01-02 end=2024-12-31 commit=abc label_seed=3\n")
+            r3 = audit_run.audit_run(run3)
+            assert r3["label_seed"] == "3" and audit_run.audit_run(run1)["label_seed"] == "0"
+            text3, _ = audit_run.render([run, r3])
+            assert "differs across runs" not in text3 and "read different price files" in text3
+            assert "asset order LABEL_SEED=3" in text3 and "asset order canonical" in text3
     finally:
         run_monthly.build_universe = saved
     import ace_harness.llm_client as llm
@@ -401,6 +412,18 @@ def test_preflight():
     assert "('2025-03-03', -50.0)" in text and "u2             common trading days=140 2025-01-01..2025-07-15" in text
     assert "u3             missing ['BAD']" in text
     print("[preflight] failed downloads, short tickers and big one-day moves are reported")
+
+
+def test_universe_orders():
+    from ace_harness import universes
+    for name, tickers in universes.UNIVERSES.items():
+        assert universes.ordered(name) == universes.ordered(name, 0) == tickers, "seed 0 = canonical order"
+        shuffled = universes.ordered(name, 2)
+        assert sorted(shuffled) == sorted(tickers) and shuffled == universes.ordered(name, 2), name
+    assert universes.ordered("sp30", 2) != universes.UNIVERSES["sp30"] != universes.ordered("sp30", 3)
+    # pinned, so a Python whose random.shuffle differs is noticed (the driver also records ASSET_ORDER)
+    assert universes.ordered("mag7", 3) == "MSFT GOOGL AAPL AMZN NVDA TSLA META".split()
+    print("[universes] seed 0 is the canonical order; seeds give fixed permutations of the same tickers")
 
 
 def test_price_cache():
@@ -532,6 +555,7 @@ def run_all():
     test_summarize_runs()
     test_audit_run()
     test_preflight()
+    test_universe_orders()
     test_price_cache()
     print("CORE TESTS PASSED")
 

@@ -267,7 +267,12 @@ def audit_run(root):
     for cell_dir in present:
         cells.append(audit_cell(cell_dir))
     window = _check_windows(cells)
-    return {"root": root, "window": window, "cells": cells, "snapshot": _snapshot(root)}
+    config = {}
+    if os.path.exists(os.path.join(root, "RUN_CONFIG")):  # the driver's "key=value ..." line
+        with open(os.path.join(root, "RUN_CONFIG")) as f:
+            config = dict(kv.split("=", 1) for kv in f.read().split() if "=" in kv)
+    return {"root": root, "window": window, "cells": cells, "snapshot": _snapshot(root),
+            "label_seed": config.get("label_seed", "0")}
 
 
 def _campaign_flags(runs):
@@ -280,7 +285,8 @@ def _campaign_flags(runs):
                 shas[c["git_sha"][:7]].append(f"{run['root']}/{c['cell']}")
     if len(shas) > 1:
         flags.append("cells ran on different commits: " +
-                     "; ".join(f"{sha} ({len(cells)} cells, e.g. {cells[0]})" for sha, cells in sorted(shas.items())))
+                     "; ".join(f"{sha} ({len(cells)} cells, e.g. {cells[0]})" for sha, cells in sorted(shas.items()))
+                     + f" (what changed in run code: git diff --stat {' '.join(sorted(shas))} -- ace_harness ReAct)")
     windows = {run["root"]: run["window"] for run in runs if run["window"]}
     if len(set(windows.values())) > 1:
         flags.append(f"runs requested different windows: {windows}")
@@ -296,24 +302,30 @@ def _campaign_flags(runs):
 
 def _hash_report(runs):
     """data_hash per universe: within each run (cells download prices when they
-    start, so a dividend between two cells changes adjusted prices) and across runs."""
+    start, so a dividend between two cells changes adjusted prices) and across runs
+    with the same LABEL_SEED (data_hash is keyed by anonymous label, so a shuffled
+    asset order changes it; the price snapshot check compares those runs)."""
     lines = []
     for universe in UNIVERSES:
         per_run = []
         for run in runs:
             hashes = {c["system"]: c["data_hash"] for c in run["cells"]
                       if c["universe"] == universe and c.get("data_hash")}
-            per_run.append(hashes)
+            per_run.append((run, hashes))
             distinct = set(hashes.values())
             if len(distinct) > 1:
                 groups = collections.defaultdict(list)
                 for s, h in hashes.items():
                     groups[h[:10]].append(s)
                 lines.append(f"  {run['root']} {universe}: DIFFERS within the run {dict(groups)}")
-        firsts = [sorted(set(h.values())) for h in per_run if h]
-        if len(firsts) > 1 and any(f != firsts[0] for f in firsts[1:]):
-            lines.append(f"  {universe}: differs across runs " +
-                         " | ".join(f"{run['root']}: {[h[:10] for h in f]}" for run, f in zip(runs, firsts)))
+        by_seed = collections.defaultdict(list)
+        for run, hashes in per_run:
+            if hashes:
+                by_seed[run.get("label_seed", "0")].append((run, sorted(set(hashes.values()))))
+        for group in by_seed.values():
+            if len(group) > 1 and any(f != group[0][1] for _, f in group[1:]):
+                lines.append(f"  {universe}: differs across runs " +
+                             " | ".join(f"{run['root']}: {[h[:10] for h in f]}" for run, f in group))
     return lines
 
 
@@ -326,7 +338,9 @@ def render(runs):
     for run in runs:
         cells = run["cells"]
         window = "..".join(run["window"]) if run["window"] else "?"
-        lines.append(f"AUDIT {run['root']}  ({len(cells)} cells, requested {window})")
+        seed = run.get("label_seed", "0")
+        lines.append(f"AUDIT {run['root']}  ({len(cells)} cells, requested {window}, asset order "
+                     f"{'canonical' if seed == '0' else 'LABEL_SEED=' + seed})")
         lines.append(f"{'cell':<24} {'status':<9} {'sha':<8} {'dirty':<6} {'days':>4} {'tasks':>5} "
                      f"{'refl':>4} {'@cap':>4} {'rmax':>5} {'cur':>4} {'@cap':>4} {'reviews':>7} {'accept':>6} "
                      f"{'pfail':>5} {'eqw':>4} {'mem':>4}")

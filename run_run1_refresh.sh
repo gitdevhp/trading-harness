@@ -42,6 +42,12 @@
 #                       ADAP = AUTOGOV + outcome grounding) and DEBATER+STOP (ADAP's stops
 #                       without memory).
 #   RUN_LABEL=run1      output subdirectory; use run2 / run3 for replicates (FULL=1).
+#   LABEL_SEED=0        0 (default): each universe's canonical ticker order. N > 0: a fixed
+#                       shuffle of every universe's tickers (ace_harness/universes.py), i.e. the
+#                       same data under different anonymous labels and listing order. Greedy
+#                       decoding makes a rerun on identical inputs bit-identical (run1 and run2
+#                       of campaign_2024 matched in every cell), so replicates must perturb
+#                       something irrelevant: run1 keeps seed 0, run2 / run3 use seeds 2 / 3.
 #   ONLY="u:s u:s"      run exactly these cells instead (e.g. ONLY="mag7:adap sp30:qwen"
 #                       END_DATE=2024-03-31 for a quick GPU smoke test).
 #   BASE_TSV=path       your current RUN 1 table (TSV, same columns): the printed
@@ -59,9 +65,9 @@
 # Every job serves vLLM on port 8000, so chain the replicates instead of running them together
 # (pass every variable inline: sbatch exports the submitting shell's environment):
 #   C=$PWD/campaign_2024
-#   j1=$(OUT_ROOT=$C RUN_LABEL=run1 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
-#   j2=$(OUT_ROOT=$C RUN_LABEL=run2 FULL=1 EXTRAS=1 sbatch --parsable --dependency=afterany:${j1%%;*} run_run1_refresh.sh)
-#   OUT_ROOT=$C RUN_LABEL=run3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:${j2%%;*} run_run1_refresh.sh
+#   j1=$(OUT_ROOT=$C RUN_LABEL=run1 LABEL_SEED=0 FULL=1 EXTRAS=1 sbatch --parsable run_run1_refresh.sh)
+#   j2=$(OUT_ROOT=$C RUN_LABEL=run2 LABEL_SEED=2 FULL=1 EXTRAS=1 sbatch --parsable --dependency=afterany:${j1%%;*} run_run1_refresh.sh)
+#   OUT_ROOT=$C RUN_LABEL=run3 LABEL_SEED=3 FULL=1 EXTRAS=1 sbatch --dependency=afterany:${j2%%;*} run_run1_refresh.sh
 # After a run: python -m ace_harness.audit_run $C/run1 [$C/run2 ...] checks every cell from its sidecars.
 
 set -euo pipefail
@@ -97,6 +103,8 @@ REUSE_DEBATER="${REUSE_DEBATER:-0}"
 FULL="${FULL:-0}"
 EXTRAS="${EXTRAS:-0}"
 RUN_LABEL="${RUN_LABEL:-run1}"
+LABEL_SEED="${LABEL_SEED:-0}"
+[[ "$LABEL_SEED" =~ ^[0-9]+$ ]] || { echo "LABEL_SEED must be a non-negative integer" >&2; exit 1; }
 JOB_ID="${SLURM_JOB_ID:-local_$(date +%Y%m%d_%H%M%S)}"
 OUT_ROOT="${OUT_ROOT:-${ROOT_DIR}/run1_refresh_${JOB_ID}}"
 mkdir -p "$OUT_ROOT"
@@ -122,6 +130,7 @@ echo "$RISK_TUNER" > "${RUN_DIR}/RISK_TUNER"
 export RISK_TUNER
 COMMIT="$(git rev-parse HEAD)"
 RUN_CONFIG="start=${START_DATE} end=${END_DATE} model=${MODEL} max_tokens=${MAX_TOKENS} capital=${INITIAL_CAPITAL} rebalance_days=${REBALANCE_DAYS} commit=${COMMIT}"
+[[ "$LABEL_SEED" != "0" ]] && RUN_CONFIG+=" label_seed=${LABEL_SEED}"  # seed 0 keeps earlier RUN_CONFIGs valid
 if [[ -f "${RUN_DIR}/RUN_CONFIG" && "$(cat "${RUN_DIR}/RUN_CONFIG")" != "$RUN_CONFIG" ]]; then
     echo "ERROR: ${RUN_DIR} was started with '$(cat "${RUN_DIR}/RUN_CONFIG")', not '${RUN_CONFIG}';" \
          "use a new OUT_ROOT/RUN_LABEL" >&2
@@ -178,7 +187,8 @@ if [[ -n "${ONLY:-}" ]]; then
     done
 fi
 
-get_tickers() { python -m ace_harness.universes "$1"; }
+get_tickers() { python -m ace_harness.universes "$1" --seed "$LABEL_SEED"; }
+for u in "${ALL_UNIVERSES[@]}"; do echo "${u}: $(get_tickers "$u")"; done > "${RUN_DIR}/ASSET_ORDER"
 
 cell_done() {  # 0 = done, 1 = (re)run it, 2 = inconsistent cell: abort
               # done = results exist; ace cells also need a complete manifest with the requested RiskTuner
@@ -249,27 +259,69 @@ echo "RUN 1 REFRESH  (${RUN_LABEL})"
 echo "Model: ${MODEL}  temperature 0.0  |  RiskTuner: ${RISK_TUNER}  |  FULL=${FULL}  EXTRAS=${EXTRAS}"
 echo "Period: ${START_DATE} -> ${END_DATE}  |  Output: ${RUN_DIR}  |  Prices: ${ACE_PRICE_CACHE}"
 echo "Cells (${#CELLS[@]}): ${CELLS[*]}"
+echo "Asset order: $([[ "$LABEL_SEED" == "0" ]] && echo canonical || echo "shuffled, LABEL_SEED=${LABEL_SEED}")" \
+     "(${RUN_DIR}/ASSET_ORDER)"
 echo "=========================================="
 
 # ── vLLM (same server flags as the original runs) ────────────────────────────
-if curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" >/dev/null 2>&1; then
+# A chained job often lands on the GPU the previous job just released; its port and its
+# memory can take a minute or two to free, and vLLM refuses to start while more than 10%
+# of the GPU is in use. Wait for both and retry a failed start before giving up.
+wait_for_port() {
+    local i
+    for i in $(seq 1 40); do
+        curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" >/dev/null 2>&1 || return 0
+        echo "port ${VLLM_PORT} still answers (a previous server shutting down?); waiting"
+        sleep 15
+    done
     echo "ERROR: a server is already listening on port ${VLLM_PORT}; refusing to run on a server this job" \
          "does not own" >&2
     exit 1
-fi
+}
+wait_for_free_gpu() {
+    local gpu="${CUDA_VISIBLE_DEVICES:-0}" used i
+    gpu="${gpu%%,*}"
+    for i in $(seq 1 40); do
+        used="$(nvidia-smi -i "$gpu" --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1 | tr -d ' ')"
+        [[ "$used" =~ ^[0-9]+$ ]] || return 0  # no reading: let vLLM decide
+        (( used < 2048 )) && return 0
+        echo "GPU ${gpu}: ${used} MiB still in use; waiting"
+        sleep 15
+    done
+}
+start_vllm() {  # 0 = serving; 1 = died or timed out
+    vllm serve "$MODEL" --host 127.0.0.1 --port "$VLLM_PORT" --tensor-parallel-size 1 \
+        --max-model-len 32768 --gpu-memory-utilization 0.90 --enable-chunked-prefill \
+        --enable-auto-tool-choice --tool-call-parser hermes &
+    VLLM_PID=$!
+    local start_t
+    start_t=$(date +%s)
+    until curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" >/dev/null 2>&1; do
+        if ! kill -0 "$VLLM_PID" 2>/dev/null; then
+            wait "$VLLM_PID" 2>/dev/null || true
+            VLLM_PID=""
+            return 1
+        fi
+        if (( $(date +%s) - start_t >= 1800 )); then
+            cleanup
+            VLLM_PID=""
+            return 1
+        fi
+        sleep 5
+    done
+}
 VLLM_PID=""
 cleanup() { [[ -n "$VLLM_PID" ]] && kill "$VLLM_PID" 2>/dev/null && wait "$VLLM_PID" 2>/dev/null || true; }
 trap cleanup EXIT
-vllm serve "$MODEL" --host 127.0.0.1 --port "$VLLM_PORT" --tensor-parallel-size 1 \
-    --max-model-len 32768 --gpu-memory-utilization 0.90 --enable-chunked-prefill \
-    --enable-auto-tool-choice --tool-call-parser hermes &
-VLLM_PID=$!
-START_T=$(date +%s)
-until curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" >/dev/null 2>&1; do
-    kill -0 "$VLLM_PID" 2>/dev/null || { echo "ERROR: vLLM died"; exit 1; }
-    (( $(date +%s) - START_T >= 1800 )) && { echo "ERROR: vLLM startup timed out"; exit 1; }
-    sleep 5
+for attempt in 1 2 3; do
+    wait_for_port
+    wait_for_free_gpu
+    start_vllm && break
+    echo "vLLM failed to start (attempt ${attempt}/3)"
+    (( attempt == 3 )) && { echo "ERROR: vLLM failed to start 3 times"; exit 1; }
+    sleep 60
 done
+kill -0 "$VLLM_PID" 2>/dev/null || { echo "ERROR: port ${VLLM_PORT} answered but this job's vLLM is not running"; exit 1; }
 SERVED=$(curl -fsS "http://127.0.0.1:${VLLM_PORT}/v1/models" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'][0]['id'])")
 [[ "$SERVED" == "$MODEL" ]] || { echo "ERROR: serving ${SERVED}, expected ${MODEL}"; exit 1; }
 echo "vLLM online: ${SERVED}"
