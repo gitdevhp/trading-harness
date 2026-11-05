@@ -414,6 +414,42 @@ def test_preflight():
     print("[preflight] failed downloads, short tickers and big one-day moves are reported")
 
 
+def test_baselines():
+    """The six rule-based baselines are computed from the prices embedded in an
+    ace cell's results, with make_table's metric definitions and columns."""
+    import pandas as pd
+    from ace_harness import baselines, make_table
+    from ace_harness import summarize_full_run as sfr
+
+    days = [d.strftime("%Y-%m-%d") for d in pd.bdate_range("2024-01-02", periods=252)]
+    path = [100.0 * (1.001 ** i) * (1.02 if i % 7 == 0 else 1.0) for i in range(len(days))]
+    with tempfile.TemporaryDirectory() as tmp:
+        cell = os.path.join(tmp, "run1", "mag7", "memory")
+        os.makedirs(cell)
+        recs = [{"date": d, "portfolio_value": 1e6, "prices": {"AAA": p, "BBB": p, "CCC": p}}
+                for d, p in zip(days, path)]
+        json.dump(recs, open(os.path.join(cell, "monthly_memory_only_x_results.json"), "w"))
+        rows, missing, skipped = baselines.build(os.path.join(tmp, "run1"))
+        saved = sfr._HAS_SCIPY
+        sfr._HAS_SCIPY = False
+        try:
+            rows_noscipy, _, skipped_noscipy = baselines.build(os.path.join(tmp, "run1"))
+        finally:
+            sfr._HAS_SCIPY = saved
+    assert missing == [u for u in make_table.UNIVERSES if u != "mag7"]
+    names = [r[1] for r in rows]
+    assert names == (baselines.ORDER if sfr._HAS_SCIPY else baselines.ORDER[:3]) and skipped == (
+        [] if sfr._HAS_SCIPY else baselines.ORDER[3:])
+    assert [r[1] for r in rows_noscipy] == baselines.ORDER[:3] and skipped_noscipy == baselines.ORDER[3:]
+    assert all(len(r) == len(make_table.HEADER) and r[0] == "baseline" and r[2] == "mag7" for r in rows)
+    # identical price paths: equal weight never trades after day 0, so it earns exactly the path's return
+    ew = rows[0]
+    assert ew[1] == "Equal-Weight" and ew[3] == str(round((path[-1] / path[0] - 1) * 100, 2)), ew
+    cross = baselines.cross_universe(rows)
+    assert cross[1][:2] == ["Equal-Weight", "1"] and cross[1][2] == str(round(float(ew[3]), 2))
+    print("[baselines] six rule-based baselines from the run's embedded prices, in make_table's columns")
+
+
 def test_universe_orders():
     from ace_harness import universes
     for name, tickers in universes.UNIVERSES.items():
@@ -556,6 +592,7 @@ def run_all():
     test_audit_run()
     test_preflight()
     test_universe_orders()
+    test_baselines()
     test_price_cache()
     print("CORE TESTS PASSED")
 
